@@ -20,10 +20,6 @@ def detect_table_green(img):
 
     return mask
 
-# Usage:
-# green_mask = detect_table_green('image_2ba55e.jpg')
-# cv2.imshow('Table Mask', green_mask)
-# cv2.waitKey(0)
 
 def get_table_corners(image_path):
 
@@ -43,26 +39,6 @@ def get_table_corners(image_path):
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (60, 60))
     closed_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
 
-    ### DEBUG: show mask, image, and closed mask side by side ###
-    plt.figure(figsize=(18, 6))
-    plt.subplot(1, 3, 1)
-    plt.title('Original Image')
-    img_resized = cv2.resize(img, (img.shape[1] // 2, img.shape[0] // 2))
-    plt.imshow(cv2.cvtColor(img_resized, cv2.COLOR_BGR2RGB))
-    plt.axis('off')
-    plt.subplot(1, 3, 2)
-    plt.title('Green Mask')
-    mask_resized = cv2.resize(mask, (mask.shape[1] // 2, mask.shape[0] // 2))
-    plt.imshow(mask_resized, cmap='gray')
-    plt.axis('off')
-    plt.subplot(1, 3, 3)
-    plt.title('Mask After Closing')
-    closed_mask_resized = cv2.resize(closed_mask, (closed_mask.shape[1] // 2, closed_mask.shape[0] // 2))
-    plt.imshow(closed_mask_resized, cmap='gray')
-    plt.axis('off')
-    plt.show()
-
-
     # Find the largest contour (the table surface)
     contours, _ = cv2.findContours(closed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
@@ -71,13 +47,6 @@ def get_table_corners(image_path):
 
     # Geometric Correction: Convex Hull
     hull = cv2.convexHull(table_contour)
-
-    ### DEBUG: Show hull on the same image
-    vis_img_1 = img.copy()
-    cv2.drawContours(vis_img_1, [hull], -1, (0, 255, 0), 3)   
-    vis_img_resized = cv2.resize(vis_img_1, (vis_img_1.shape[1] // 2, vis_img_1.shape[0] // 2))
-    cv2.imshow("Hull", vis_img_resized)
-    cv2.waitKey(0)
 
     # find corners with extreme points
 
@@ -102,10 +71,6 @@ def get_table_corners(image_path):
     for (x, y) in rect:
         cv2.circle(vis_img_2, (int(x), int(y)), 10, (0, 0, 255), -1) # Red dots
     
-    vis_img_2_resized = cv2.resize(vis_img_2, (vis_img_2.shape[1] // 2, vis_img_2.shape[0] // 2))
-    cv2.imshow("Hull with Corners", vis_img_2_resized)
-    cv2.waitKey(0)
-
     return rect
 
 # Utility function to show the histogram of the Hue channel
