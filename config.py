@@ -1,7 +1,7 @@
 """Configuration for projector calibration system"""
 
 # Hardware settings
-CAMERA_INDEX = 0
+CAMERA_INDEX = 0 # index of the camera to use
 PROJECTOR_WIDTH = 1920
 PROJECTOR_HEIGHT = 1080
 MAIN_MONITOR_WIDTH = 1920  # Your laptop/main screen width (for window positioning)
