@@ -40,11 +40,17 @@ class BallDetectionConfig:
         # Color classification thresholds (HSV)
         orange_hue: Tuple[int, int] = (10, 25),
         yellow_hue: Tuple[int, int] = (25, 35),
-        blue_hue: Tuple[int, int] = (95, 125),
+        blue_hue: Tuple[int, int] = (95, 115),
+        purple_hue: Tuple[int, int] = (120, 140),
         red1_hue: Tuple[int, int] = (0, 10),
         red2_hue: Tuple[int, int] = (170, 179),
         white_sat_max: int = 40,
         white_val_min: int = 180,
+        black_val_max: int = 75,
+        black_pixel_val_max: int = 90,
+        black_dark_ratio_min: float = 0.45,
+        black_sat_for_dark: int = 110,
+        black_inner_scale: float = 0.7,
     ) -> None:
         # HSV thresholds for green table (will be adapted around dominant hue)
         self.green_hue_window = green_hue_window
@@ -73,10 +79,16 @@ class BallDetectionConfig:
         self.orange_hue = orange_hue
         self.yellow_hue = yellow_hue
         self.blue_hue = blue_hue
+        self.purple_hue = purple_hue
         self.red1_hue = red1_hue
         self.red2_hue = red2_hue
         self.white_sat_max = white_sat_max
         self.white_val_min = white_val_min
+        self.black_val_max = black_val_max
+        self.black_pixel_val_max = black_pixel_val_max
+        self.black_dark_ratio_min = black_dark_ratio_min
+        self.black_sat_for_dark = black_sat_for_dark
+        self.black_inner_scale = black_inner_scale
 
 
 def _order_points_clockwise(pts: np.ndarray) -> np.ndarray:
@@ -170,6 +182,53 @@ def _mean_hue_in_bbox(
         angle += 2.0 * np.pi
     return float(angle * (180.0 / (2.0 * np.pi)))
 
+
+def _median_hue_in_bbox(
+    hsv: np.ndarray,
+    bbox: BBox,
+    min_sat: int,
+    min_val: int,
+) -> Optional[float]:
+    """
+    Circular median hue in [0, 180) for robust color classification.
+    Uses the sample hue that minimizes summed circular distance.
+    """
+    x, y, w, h = bbox
+    h_img, w_img = hsv.shape[:2]
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(w_img, x + w)
+    y1 = min(h_img, y + h)
+    if x1 <= x0 or y1 <= y0:
+        return None
+
+    roi = hsv[y0:y1, x0:x1]
+    h_ch = roi[:, :, 0]
+    s_ch = roi[:, :, 1]
+    v_ch = roi[:, :, 2]
+    valid = (s_ch >= min_sat) & (v_ch >= min_val)
+    if not np.any(valid):
+        return None
+
+    hues = h_ch[valid].astype(np.float32).ravel()
+    if hues.size == 0:
+        return None
+    if hues.size == 1:
+        return float(hues[0])
+
+    # Reduce compute while keeping robustness for large ROIs.
+    max_samples = 500
+    if hues.size > max_samples:
+        idx = np.linspace(0, hues.size - 1, max_samples, dtype=np.int32)
+        hues = hues[idx]
+
+    a = hues[:, None]
+    b = hues[None, :]
+    d = np.abs(a - b)
+    circ_d = np.minimum(d, 180.0 - d)
+    best_idx = int(np.argmin(np.sum(circ_d, axis=1)))
+    return float(hues[best_idx])
+
 def _mean_sv_in_bbox(
     hsv: np.ndarray,
     bbox: BBox,
@@ -183,9 +242,50 @@ def _mean_sv_in_bbox(
     if x1 <= x0 or y1 <= y0:
         return None
     roi = hsv[y0:y1, x0:x1]
+    if roi.size == 0:
+        return None
     s_ch = roi[:, :, 1].astype(np.float32)
     v_ch = roi[:, :, 2].astype(np.float32)
     return float(np.mean(s_ch)), float(np.mean(v_ch))
+
+
+def _dark_ratio_in_bbox(
+    hsv: np.ndarray,
+    bbox: BBox,
+    val_max: int,
+    sat_max: int = 255,
+    inner_scale: float = 1.0,
+) -> Optional[float]:
+    x, y, w, h = bbox
+    h_img, w_img = hsv.shape[:2]
+    x0 = max(0, x)
+    y0 = max(0, y)
+    x1 = min(w_img, x + w)
+    y1 = min(h_img, y + h)
+    if x1 <= x0 or y1 <= y0:
+        return None
+    roi = hsv[y0:y1, x0:x1]
+    if roi.size == 0:
+        return None
+    v = roi[:, :, 2]
+    s = roi[:, :, 1]
+
+    if inner_scale < 1.0:
+        h_roi, w_roi = v.shape[:2]
+        cx = (w_roi - 1) * 0.5
+        cy = (h_roi - 1) * 0.5
+        r = max(1.0, 0.5 * min(w_roi, h_roi) * inner_scale)
+        yy, xx = np.ogrid[:h_roi, :w_roi]
+        inner = ((xx - cx) ** 2 + (yy - cy) ** 2) <= (r * r)
+    else:
+        inner = np.ones(v.shape, dtype=bool)
+
+    valid = inner & (s <= sat_max)
+    total = int(np.count_nonzero(valid))
+    if total == 0:
+        return None
+    dark = int(np.count_nonzero(valid & (v <= val_max)))
+    return float(dark / float(total))
 
 def _classify_color(
     hsv: np.ndarray,
@@ -197,18 +297,31 @@ def _classify_color(
         mean_s, mean_v = sv
         if mean_s <= cfg.white_sat_max and mean_v >= cfg.white_val_min:
             return "white"
+        dark_ratio = _dark_ratio_in_bbox(
+            hsv,
+            bbox,
+            cfg.black_pixel_val_max,
+            sat_max=cfg.black_sat_for_dark,
+            inner_scale=cfg.black_inner_scale,
+        )
+        if mean_v <= cfg.black_val_max or (
+            dark_ratio is not None and dark_ratio >= cfg.black_dark_ratio_min
+        ):
+            return "black"
 
-    mean_hue = _mean_hue_in_bbox(hsv, bbox, cfg.green_min_sat, cfg.green_min_val)
-    if mean_hue is None:
+    median_hue = _median_hue_in_bbox(hsv, bbox, cfg.green_min_sat, cfg.green_min_val)
+    if median_hue is None:
         return "unknown"
 
-    h = float(mean_hue)
+    h = float(median_hue)
     if cfg.orange_hue[0] <= h <= cfg.orange_hue[1]:
         return "orange"
     if cfg.yellow_hue[0] <= h <= cfg.yellow_hue[1]:
         return "yellow"
     if cfg.blue_hue[0] <= h <= cfg.blue_hue[1]:
         return "blue"
+    if cfg.purple_hue[0] <= h <= cfg.purple_hue[1]:
+        return "purple"
     if (cfg.red1_hue[0] <= h <= cfg.red1_hue[1]) or (cfg.red2_hue[0] <= h <= cfg.red2_hue[1]):
         return "bordeaux"
 
@@ -473,22 +586,39 @@ def draw_detections(
 
 if __name__ == "__main__":
     ref_path="ref.jpeg"
-    img_path="WhatsApp Image 2026-02-20 at 11.06.56.jpeg"
+    img_path="img_1.jpeg"
 
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
+    cfg = BallDetectionConfig()
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     corners = _load_table_corners_from_scene_understanding(ref_path)
     if corners is None:
         raise SystemExit("Failed to load corners from Scene_Understanding")
-    dets = detect_balls(img, table_corners=corners, ref_path=ref_path)
-    colored = detect_balls_with_color(img, table_corners=corners, ref_path=ref_path)
+    dets = detect_balls(img, table_corners=corners, ref_path=ref_path, config=cfg)
+    colored = detect_balls_with_color(img, table_corners=corners, ref_path=ref_path, config=cfg)
     vis = draw_detections(img, dets)
     for (x, y) in corners:
         cv2.circle(vis, (int(x), int(y)), 8, (255, 0, 255), -1)
+    for i, d in enumerate(dets):
+        x, y, w, h = d.bbox
+        label_pos = (max(0, x), max(15, y - 6))
+        cv2.putText(
+            vis,
+            str(i),
+            label_pos,
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2,
+            cv2.LINE_AA,
+        )
     cv2.imwrite("pool_table_annotated.jpeg", vis)
+
     print(f"detections: {len(dets)}")
     for i, d in enumerate(dets):
-        print(i, d.center, d.bbox, d.radius_px)
+        median_hue = _median_hue_in_bbox(hsv, d.bbox, cfg.green_min_sat, cfg.green_min_val)
+        print(i, d.center, d.bbox, d.radius_px, "median_hue", median_hue)
     print("colored detections:")
     print(colored)
