@@ -1,21 +1,25 @@
 """
-Billiards Assistance System - GUI Module
-=========================================
+Billiards Assistance System — GUI / Rendering Module
+=====================================================
 PyQt5 application with three-page flow:
   Page 0 — SetupPage:       hardware selection (camera index, projector yes/no)
   Page 1 — CalibrationPage: live camera preview, corner clicking, auto-detect
   Page 2 — Main view:       camera feed with ball overlays and trajectory lines
 
-Calibration homographies are stored in memory only (no project-folder files).
-A user-invisible cache at ~/.billiards_assistant/ enables "Use Last" on restart.
+This file is the rendering / GUI layer only.  No game logic or path math.
 
-Two output modes (main view):
-  Screen Mode     — top-down warped camera feed shown on the operator's monitor.
-  Projection Mode — black-background overlay in projector coordinates, displayed
-                    fullscreen on a second monitor / projector.
+Public API used by main.py:
+  BilliardsApp(tick_callback)   — main window; tick_callback called every 33 ms
+  app.grab_frame()              — latest raw BGR camera frame
+  app.consume_pending_clicks()  — (x_cm, y_cm) clicks since last call
+  app.render(frame, balls, ...) — draw overlays and push to screen/projector
+  app.cam_H                     — camera→table homography (set by CalibrationPage)
+  app.table_corners             — 4 camera-pixel corner points (set by CalibrationPage)
+  app.selected_pocket_cm        — manually selected pocket in table cm (or None)
 
-Integration usage:
-    from gui import BilliardsApp, draw_overlay
+Coordinate system rule:
+  All coordinates ENTERING render() are in table centimetres.
+  Conversion to display pixels (table_cm × TABLE_DISPLAY_SCALE) happens here only.
 """
 
 import sys
@@ -23,30 +27,14 @@ import os
 import pathlib
 import shutil
 import tempfile
+from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import cv2
 
-# ── Make parent directory importable (config.py, Ball_Detection.py …) ────────
-_PARENT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if _PARENT not in sys.path:
-    sys.path.insert(0, _PARENT)
-
 import config
 
 # ── Optional module imports (graceful fallback) ───────────────────────────────
-try:
-    from Ball_Detection import detect_balls as _detect_balls_impl
-    DETECTION_AVAILABLE = True
-except (ImportError, AttributeError):
-    DETECTION_AVAILABLE = False
-
-try:
-    from Physics_Engine import calculate_path as _calculate_path_impl
-    PHYSICS_AVAILABLE = True
-except (ImportError, AttributeError):
-    PHYSICS_AVAILABLE = False
-
 try:
     from Scene_Understanding import (
         get_table_corners,
@@ -65,10 +53,8 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QFont
 
-from typing import Dict, List, Optional, Tuple
-
 # ═════════════════════════════════════════════════════════════════════════════
-# Cache paths  (user home — completely invisible to the user)
+# Cache paths  (user home — invisible to the user)
 # ═════════════════════════════════════════════════════════════════════════════
 
 _CACHE_DIR  = pathlib.Path.home() / '.billiards_assistant'
@@ -84,20 +70,22 @@ MODE_PROJECTION = 'projection'
 
 # Top-down (bird's-eye) view — 8 px/cm → 122×61 cm → 976×488 px canvas
 TABLE_DISPLAY_SCALE  = 8
-BALL_RADIUS_TOP_DOWN = 23   # ≈ 2.85 cm × 8 px/cm (standard pool ball)
+BALL_RADIUS_TOP_DOWN = 23   # ≈ 2.875 cm × 8 px/cm (standard pool ball)
 
 # Billiards ball color name → OpenCV BGR
 BALL_COLORS_BGR: Dict[str, Tuple[int, int, int]] = {
-    'white':  (255, 255, 255),
-    'yellow': (0,   230, 255),
-    'blue':   (210, 100,   0),
-    'red':    (0,     0, 210),
-    'purple': (170,   0, 120),
-    'orange': (0,   130, 255),
-    'green':  (0,   160,  50),
-    'maroon': (0,    30, 120),
-    'black':  (40,   40,  40),
-    'gray':   (128, 128, 128),
+    'white':    (255, 255, 255),
+    'yellow':   (0,   230, 255),
+    'blue':     (210, 100,   0),
+    'red':      (0,     0, 210),
+    'bordeaux': (0,    30, 120),
+    'purple':   (170,   0, 120),
+    'orange':   (0,   130, 255),
+    'green':    (0,   160,  50),
+    'maroon':   (0,    30, 120),
+    'black':    (40,   40,  40),
+    'gray':     (128, 128, 128),
+    'unknown':  (100, 100, 100),
 }
 
 COLOR_TRAJECTORY  = (0, 255, 150)   # bright green-cyan  — cue ball path
@@ -109,6 +97,7 @@ COLOR_POCKET_SEL  = (0, 220, 255)   # highlighted selected pocket
 POCKET_CLICK_RADIUS = 30  # px tolerance for clicking a pocket marker
 
 # Standard billiards table: 6 pockets in table-cm coordinates.
+# Derived from table dimensions (not hardcoded arbitrary values).
 POCKET_POSITIONS_TABLE = [
     {'name': 'top-left',      'pos': (0.0,                      0.0)},
     {'name': 'top-center',    'pos': (config.TABLE_WIDTH_CM / 2, 0.0)},
@@ -258,7 +247,6 @@ class SetupPage(QWidget):
         outer.setContentsMargins(40, 40, 40, 40)
         outer.setSpacing(20)
 
-        # Title
         title = QLabel('Billiards Assistance System')
         title.setAlignment(Qt.AlignCenter)
         f = QFont()
@@ -273,7 +261,6 @@ class SetupPage(QWidget):
         sub.setStyleSheet('color: #888; font-size: 12px;')
         outer.addWidget(sub)
 
-        # ── Camera group ─────────────────────────────────────────────────────
         cam_group = QGroupBox('Camera')
         cam_layout = QVBoxLayout(cam_group)
 
@@ -295,7 +282,6 @@ class SetupPage(QWidget):
         cam_layout.addLayout(idx_row)
         outer.addWidget(cam_group)
 
-        # ── Projector group ───────────────────────────────────────────────────
         proj_group = QGroupBox('Projector')
         proj_layout = QVBoxLayout(proj_group)
         self._chk_projector = QCheckBox('Projector connected')
@@ -303,7 +289,6 @@ class SetupPage(QWidget):
         proj_layout.addWidget(self._chk_projector)
         outer.addWidget(proj_group)
 
-        # ── Mock label ────────────────────────────────────────────────────────
         self._lbl_mock = QLabel('(No hardware selected — will run in mock/demo mode)')
         self._lbl_mock.setAlignment(Qt.AlignCenter)
         self._lbl_mock.setStyleSheet('color: #888; font-size: 11px;')
@@ -312,7 +297,6 @@ class SetupPage(QWidget):
 
         outer.addStretch()
 
-        # ── Start button ──────────────────────────────────────────────────────
         self._btn_start = QPushButton('Start Pipeline')
         self._btn_start.setMinimumHeight(44)
         f2 = QFont()
@@ -344,15 +328,8 @@ class SetupPage(QWidget):
 class CalibrationPage(QWidget):
     """
     Live camera preview with interactive 4-corner calibration.
-
-    The user can:
-      • Click the feed to add / drag corner points (up to 4)
-      • Click "Auto-detect" to run green-felt detection automatically
-      • Click "Accept" (enabled when 4 corners are placed) to compute H
-      • Click "Use Last" (enabled when a cache file exists) to reuse saved H
-      • Click "Skip" to proceed without camera calibration
-
     Emits calibration_done(H) where H is np.ndarray or None.
+    After accepting, self.accepted_corners holds the 4 camera-pixel corner points.
     """
     calibration_done = pyqtSignal(object)  # np.ndarray | None
 
@@ -360,13 +337,13 @@ class CalibrationPage(QWidget):
         super().__init__()
         self._cap        = None
         self._timer      = None
-        self._frame      = None          # latest raw camera frame
+        self._frame      = None
         self._corners    : List         = []
         self._drag_idx   : int          = -1
         self._camera_idx : int          = 0
+        # Stored after Accept — accessible by BilliardsApp to get table_corners
+        self.accepted_corners: Optional[np.ndarray] = None
         self._build()
-
-    # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build(self):
         layout = QVBoxLayout(self)
@@ -387,7 +364,6 @@ class CalibrationPage(QWidget):
         self._instructions.setStyleSheet('color: #888; font-size: 11px;')
         layout.addWidget(self._instructions)
 
-        # Camera preview
         self._cam_label = ClickableLabel()
         self._cam_label.setAlignment(Qt.AlignCenter)
         self._cam_label.setStyleSheet(
@@ -398,23 +374,16 @@ class CalibrationPage(QWidget):
         self._cam_label.clicked.connect(self._on_label_click)
         layout.addWidget(self._cam_label, stretch=1)
 
-        # Corner count status
         self._lbl_corners = QLabel('Corners: 0 / 4')
         self._lbl_corners.setAlignment(Qt.AlignCenter)
         self._lbl_corners.setStyleSheet('font-size: 12px; color: #aaa;')
         layout.addWidget(self._lbl_corners)
 
-        # Button row
         btn_row = QHBoxLayout()
         self._btn_auto   = QPushButton('Auto-detect')
         self._btn_accept = QPushButton('Accept')
         self._btn_last   = QPushButton('Use Last')
         self._btn_skip   = QPushButton('Skip')
-
-        self._btn_auto.setToolTip('Try to detect table corners automatically from the current frame')
-        self._btn_accept.setToolTip('Compute homography from the 4 placed corners')
-        self._btn_last.setToolTip('Use the calibration saved from the previous session')
-        self._btn_skip.setToolTip('Continue without camera calibration (overlays will be approximate)')
 
         self._btn_accept.setEnabled(False)
         self._btn_last.setEnabled(os.path.exists(_CAM_CACHE))
@@ -431,10 +400,7 @@ class CalibrationPage(QWidget):
         btn_row.addWidget(self._btn_skip)
         layout.addLayout(btn_row)
 
-    # ── Camera lifecycle ──────────────────────────────────────────────────────
-
     def start_camera(self, camera_index: int):
-        """Open the camera and start the preview timer."""
         self._camera_idx = camera_index
         self._corners    = []
         self._drag_idx   = -1
@@ -446,7 +412,6 @@ class CalibrationPage(QWidget):
             self._cam_label.setText(f'Cannot open camera {camera_index}')
             return
 
-        # Let the camera settle
         for _ in range(5):
             self._cap.read()
 
@@ -462,8 +427,6 @@ class CalibrationPage(QWidget):
             self._cap.release()
             self._cap = None
 
-    # ── Timer — live preview ──────────────────────────────────────────────────
-
     def _on_timer(self):
         if self._cap is None or not self._cap.isOpened():
             return
@@ -474,7 +437,6 @@ class CalibrationPage(QWidget):
         self._show_frame(frame)
 
     def _show_frame(self, frame: np.ndarray):
-        """Overlay corner markers on the frame and display in the label."""
         display = frame.copy()
         pts = self._corners
 
@@ -501,10 +463,7 @@ class CalibrationPage(QWidget):
                           Qt.KeepAspectRatio, Qt.SmoothTransformation)
         )
 
-    # ── Corner placement ──────────────────────────────────────────────────────
-
     def _label_to_frame(self, lx: int, ly: int) -> Optional[Tuple[int, int]]:
-        """Convert a click on the QLabel to frame pixel coordinates."""
         if self._frame is None:
             return None
         fh, fw = self._frame.shape[:2]
@@ -531,7 +490,7 @@ class CalibrationPage(QWidget):
             return
         idx = self._nearest_corner(*pt)
         if idx >= 0:
-            self._corners[idx] = pt   # move existing corner
+            self._corners[idx] = pt
         elif len(self._corners) < 4:
             self._corners.append(pt)
         self._update_corner_label()
@@ -542,8 +501,6 @@ class CalibrationPage(QWidget):
         n = len(self._corners)
         self._lbl_corners.setText(f'Corners: {n} / 4')
         self._btn_accept.setEnabled(n == 4)
-
-    # ── Button handlers ───────────────────────────────────────────────────────
 
     def _on_auto_detect(self):
         if self._frame is None or not SCENE_AVAILABLE:
@@ -560,6 +517,8 @@ class CalibrationPage(QWidget):
         if len(self._corners) != 4 or not SCENE_AVAILABLE:
             return
         corners_arr = np.array(self._corners, dtype=np.float32)
+        # Store corners for BilliardsApp to read via .accepted_corners
+        self.accepted_corners = corners_arr.copy()
         H = compute_homography_from_corners(corners_arr)
         self._finish(H)
 
@@ -567,9 +526,12 @@ class CalibrationPage(QWidget):
         if not os.path.exists(_CAM_CACHE):
             return
         H = np.load(_CAM_CACHE).astype(np.float32)
+        # No corners available from cache — accepted_corners stays None
+        self.accepted_corners = None
         self._finish(H)
 
     def _on_skip(self):
+        self.accepted_corners = None
         self._finish(None)
 
     def _finish(self, H):
@@ -589,43 +551,233 @@ class BilliardsApp(QMainWindow):
       0 → SetupPage       (hardware selection)
       1 → CalibrationPage (camera calibration)
       2 → Main view       (camera feed + overlays)
+
+    Integration with main.py:
+      Pass tick_callback to __init__. It is called every 33 ms by the QTimer.
+      main.py calls grab_frame(), then does detection + game logic, then calls render().
     """
 
-    def __init__(self):
+    def __init__(self, tick_callback: Optional[Callable] = None):
         super().__init__()
 
-        # ── Hardware / mode ──────────────────────────────────────────────────
-        self.camera_index   : int           = config.CAMERA_INDEX
-        self.use_mock       : bool          = False
-        self._wants_projector: bool         = False
+        # ── Injected orchestration callback ──────────────────────────────────
+        self._tick_callback = tick_callback
 
-        # ── Rendering state ─────────────────────────────────────────────────
-        self.mode    = MODE_SCREEN
-        self.paused  = False
+        # ── Hardware / mode ──────────────────────────────────────────────────
+        self.camera_index    : int  = config.CAMERA_INDEX
+        self.use_mock        : bool = False
+        self._wants_projector: bool = False
+
+        # ── Rendering state ──────────────────────────────────────────────────
+        self.mode   = MODE_SCREEN
+        self.paused = False
 
         # ── Calibration homographies (in-memory only) ────────────────────────
-        self.cam_H      : Optional[np.ndarray] = None   # camera → table
-        self.proj_H_inv : Optional[np.ndarray] = None   # table  → projector
+        self.cam_H      : Optional[np.ndarray] = None   # camera px → table cm
+        self.proj_H_inv : Optional[np.ndarray] = None   # table cm → projector px
 
-        # ── Ball / path state ────────────────────────────────────────────────
-        self.current_balls   : List[Dict]        = []
-        self.cue_ball        : Optional[Dict]    = None
-        self.selected_ball   : Optional[Dict]    = None
-        self.selected_pocket : Optional[Dict]    = None
-        self.cue_path        : List[Tuple]       = []
-        self.target_path     : List[Tuple]       = []
+        # ── Table corners (camera px; stored during calibration) ─────────────
+        self._table_corners: Optional[np.ndarray] = None   # shape (4, 2) float32
+
+        # ── Pending user clicks (table cm coordinates, drained by main.py) ───
+        self._pending_clicks: List[Tuple[float, float]] = []
+
+        # ── Manual pocket selection (UI state, rendering hint for main.py) ───
+        self._selected_pocket_name: Optional[str]                  = None
+        self._selected_pocket_cm  : Optional[Tuple[float, float]]  = None
 
         # ── Camera frame ─────────────────────────────────────────────────────
-        self.current_frame  : Optional[np.ndarray] = None
-        self.frozen_frame   : Optional[np.ndarray] = None
-        self._cap           = None
-        self._timer         = None
+        self.current_frame : Optional[np.ndarray] = None
+        self.frozen_frame  : Optional[np.ndarray] = None
+        self._cap          = None
+        self._timer        = None
 
         # ── Projector window ─────────────────────────────────────────────────
-        self.proj_window : Optional[ProjectorWindow] = None
+        self.proj_window: Optional[ProjectorWindow] = None
+
+        # ── Game-state cache for status panel (set by render()) ──────────────
+        self._last_stroke_count : int       = 0
+        self._last_remaining    : List[str] = []
+        self._last_game_state   : str       = 'WAITING_FOR_SHOT'
+        self._last_selected_color: Optional[str] = None
 
         # ── Build UI ─────────────────────────────────────────────────────────
         self._build_ui()
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Public API for main.py
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def grab_frame(self) -> Optional[np.ndarray]:
+        """
+        Return the latest raw camera frame (BGR ndarray).
+        Handles mock mode and paused state.
+        Does NOT apply any warp — returns camera-pixel-space frame.
+        """
+        if not self.paused:
+            frame = self._grab_frame()
+            if frame is not None:
+                self.current_frame = frame
+                self.frozen_frame  = frame.copy()
+        else:
+            frame = self.frozen_frame
+        return frame
+
+    def consume_pending_clicks(self) -> List[Tuple[float, float]]:
+        """
+        Return and clear the list of user clicks since the last call.
+        Each item is (x_cm, y_cm) in table centimetre coordinates.
+        """
+        result = list(self._pending_clicks)
+        self._pending_clicks.clear()
+        return result
+
+    def render(
+        self,
+        frame:          np.ndarray,
+        balls:          List[Dict],
+        cue_path:       List[Tuple[float, float]],
+        target_path:    List[Tuple[float, float]],
+        game_state:     str,
+        stroke_count:   int,
+        remaining:      List[str],
+        selected_color: Optional[str] = None,
+    ) -> None:
+        """
+        Draw overlays on the frame and push to the camera label.
+        Also updates the projector window if active.
+
+        Parameters
+        ----------
+        frame        : raw BGR camera frame (not warped).
+        balls        : list of ball dicts with 'center_cm', 'color', 'is_cue'.
+                       'center' (camera px) is used as fallback when cam_H is None.
+        cue_path     : [(x_cm, y_cm), ...] in table centimetres.
+        target_path  : [(x_cm, y_cm), ...] in table centimetres.
+        game_state   : current state string (e.g. 'WAITING_FOR_SHOT').
+        stroke_count : number of strokes so far.
+        remaining    : list of color names still to pocket.
+        selected_color : color of the currently selected target ball, or None.
+        """
+        top_down = self.cam_H is not None
+        S = TABLE_DISPLAY_SCALE
+
+        # Cache game state for status panel
+        self._last_stroke_count  = stroke_count
+        self._last_remaining     = remaining
+        self._last_game_state    = game_state
+        self._last_selected_color = selected_color
+
+        # ── Produce display-space (pixel) canvas ──────────────────────────────
+        if top_down:
+            canvas = self._warp_to_top_down(frame)
+        else:
+            canvas = frame.copy()
+
+        # ── Convert cm paths → display pixels ────────────────────────────────
+        def cm_to_disp(pt_cm: Tuple[float, float]) -> Tuple[int, int]:
+            if top_down:
+                return (int(pt_cm[0] * S), int(pt_cm[1] * S))
+            p = self._table_to_camera(pt_cm)
+            return p if p is not None else None
+
+        cue_path_px    = [cm_to_disp(p) for p in cue_path]
+        cue_path_px    = [p for p in cue_path_px if p is not None]
+        target_path_px = [cm_to_disp(p) for p in target_path]
+        target_path_px = [p for p in target_path_px if p is not None]
+
+        # ── Convert ball centers → display pixels ─────────────────────────────
+        # Adds '_disp' key to a copy of each ball dict for rendering.
+        balls_disp = []
+        for ball in balls:
+            cm = ball.get('center_cm')
+            if top_down and cm is not None:
+                disp = (int(cm[0] * S), int(cm[1] * S))
+            else:
+                disp = ball.get('center')  # camera px fallback
+            balls_disp.append({**ball, '_disp': disp})
+
+        # ── Pocket positions in display space ─────────────────────────────────
+        pockets = self._get_pocket_positions(frame)
+
+        # ── Draw screen-mode overlays ─────────────────────────────────────────
+        ball_r = BALL_RADIUS_TOP_DOWN if top_down else 15
+
+        # 1. Target path (orange)
+        if len(target_path_px) >= 2:
+            self._draw_trajectory(canvas, target_path_px, color=COLOR_TARGET_PATH)
+
+        # 2. Cue path (cyan), extended backwards for aiming
+        if len(cue_path_px) >= 2:
+            extended = self._extend_path_backward(cue_path_px)
+            self._draw_trajectory(canvas, extended, color=COLOR_TRAJECTORY)
+
+        # 3. Ghost-ball outline at contact point
+        if len(cue_path_px) >= 2 and selected_color is not None:
+            ghost = cue_path_px[-1]
+            cv2.circle(canvas, ghost, ball_r, COLOR_TRAJECTORY, 2, cv2.LINE_AA)
+
+        # 4. Pocket markers
+        for pocket in pockets:
+            is_sel = (pocket['name'] == self._selected_pocket_name)
+            self._draw_pocket(canvas, pocket['cam_pos'], selected=is_sel)
+
+        # 5. Detected balls
+        for ball in balls_disp:
+            disp = ball.get('_disp')
+            if disp is None:
+                continue
+            self._draw_ball(
+                canvas,
+                center     = disp,
+                radius     = ball_r,
+                color_name = ball.get('color', 'gray'),
+                is_cue     = ball.get('is_cue', False),
+                selected   = (ball.get('color') == selected_color and not ball.get('is_cue')),
+            )
+
+        # 6. Game-state overlays
+        if game_state == 'GAME_OVER':
+            self._draw_game_over(canvas, stroke_count)
+        else:
+            self._draw_score_panel(canvas, stroke_count, remaining)
+
+        # 7. Pause indicator
+        if self.paused:
+            cv2.putText(canvas, 'PAUSED', (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 200, 255), 2, cv2.LINE_AA)
+
+        # ── Push to camera label ──────────────────────────────────────────────
+        self.camera_label.setPixmap(
+            _bgr_to_pixmap(canvas).scaled(
+                self.camera_label.width(), self.camera_label.height(),
+                Qt.KeepAspectRatio, Qt.SmoothTransformation
+            )
+        )
+
+        # ── Update projector window ───────────────────────────────────────────
+        if self.proj_window is not None and self.proj_window.isVisible():
+            proj_canvas = self._render_projection_from_cm(
+                balls, cue_path, target_path, selected_color
+            )
+            self.proj_window.update_frame(proj_canvas)
+
+        # ── Update status panel ───────────────────────────────────────────────
+        self._update_status_panel()
+
+    @property
+    def table_corners(self) -> Optional[np.ndarray]:
+        """4 camera-pixel corner points, shape (4, 2) float32. Set during calibration."""
+        return self._table_corners
+
+    @property
+    def selected_pocket_cm(self) -> Optional[Tuple[float, float]]:
+        """Manually selected pocket in table cm, or None if auto-selection."""
+        return self._selected_pocket_cm
+
+    def update_status_bar(self, message: str) -> None:
+        """Set the status bar text."""
+        self.statusBar().showMessage(message)
 
     # ─────────────────────────────────────────────────────────────────────────
     # UI construction
@@ -639,17 +791,14 @@ class BilliardsApp(QMainWindow):
         self._stack = QStackedWidget()
         self.setCentralWidget(self._stack)
 
-        # Page 0: hardware setup
         self._setup_page = SetupPage()
         self._setup_page.start_requested.connect(self._on_setup_done)
         self._stack.addWidget(self._setup_page)
 
-        # Page 1: camera calibration
         self._calib_page = CalibrationPage()
         self._calib_page.calibration_done.connect(self._on_calibration_done)
         self._stack.addWidget(self._calib_page)
 
-        # Page 2: main view (camera feed + sidebar)
         self._stack.addWidget(self._build_main_ui())
 
         self._stack.setCurrentIndex(0)
@@ -682,7 +831,7 @@ class BilliardsApp(QMainWindow):
         sb.setContentsMargins(4, 4, 4, 4)
         sb.setSpacing(6)
 
-        title = QLabel('Billiards\nAssistance')
+        title = QLabel('Billiards\nGolf Game')
         title.setAlignment(Qt.AlignCenter)
         tf = QFont()
         tf.setPointSize(13)
@@ -692,27 +841,31 @@ class BilliardsApp(QMainWindow):
         sb.addWidget(title)
         sb.addWidget(self._make_divider())
 
-        # Status labels
-        hdr = QLabel('STATUS')
+        hdr = QLabel('GAME STATE')
         hdr.setStyleSheet('color: #888; font-size: 10px; letter-spacing: 1px;')
         sb.addWidget(hdr)
 
-        self.lbl_mode   = self._make_status_label('Mode: Screen')
-        self.lbl_calib  = self._make_status_label('Calibration: none')
-        self.lbl_balls  = self._make_status_label('Balls: —')
-        self.lbl_cue    = self._make_status_label('Cue: —')
-        self.lbl_target = self._make_status_label('Target: none')
-        self.lbl_pocket = self._make_status_label('Pocket: none')
-        self.lbl_detect = self._make_status_label(
-            'Detection: mock' if not DETECTION_AVAILABLE else 'Detection: real'
-        )
-        for lbl in (self.lbl_mode, self.lbl_calib, self.lbl_balls,
-                    self.lbl_cue, self.lbl_target, self.lbl_pocket, self.lbl_detect):
+        self.lbl_strokes   = self._make_status_label('Strokes: 0')
+        self.lbl_remaining = self._make_status_label('Remaining: —')
+        self.lbl_target    = self._make_status_label('Target: none')
+        self.lbl_pocket    = self._make_status_label('Pocket: auto')
+        for lbl in (self.lbl_strokes, self.lbl_remaining, self.lbl_target, self.lbl_pocket):
             sb.addWidget(lbl)
 
         sb.addWidget(self._make_divider())
 
-        # Controls
+        hdr2 = QLabel('STATUS')
+        hdr2.setStyleSheet('color: #888; font-size: 10px; letter-spacing: 1px;')
+        sb.addWidget(hdr2)
+
+        self.lbl_mode   = self._make_status_label('Mode: Screen')
+        self.lbl_calib  = self._make_status_label('Calibration: none')
+        self.lbl_detect = self._make_status_label('Detection: waiting')
+        for lbl in (self.lbl_mode, self.lbl_calib, self.lbl_detect):
+            sb.addWidget(lbl)
+
+        sb.addWidget(self._make_divider())
+
         ctrl_hdr = QLabel('CONTROLS')
         ctrl_hdr.setStyleSheet('color: #888; font-size: 10px; letter-spacing: 1px;')
         sb.addWidget(ctrl_hdr)
@@ -723,7 +876,7 @@ class BilliardsApp(QMainWindow):
         self.btn_recalib = QPushButton('Re-calibrate')
 
         self.btn_capture.setToolTip('Freeze / unfreeze camera feed (Space)')
-        self.btn_reset.setToolTip('Clear selection (R)')
+        self.btn_reset.setToolTip('Clear pocket selection (R)')
         self.btn_mode.setToolTip('Toggle Screen / Projection (M)')
         self.btn_recalib.setToolTip('Go back to calibration page')
 
@@ -739,8 +892,8 @@ class BilliardsApp(QMainWindow):
 
         hint = QLabel(
             '① Click a ball to select target.\n'
-            '② Click a ◆ pocket to aim.\n'
-            'Right-click to clear.'
+            '② Click a ◆ pocket to aim manually.\n'
+            'Right-click to clear pocket.'
         )
         hint.setStyleSheet('color: #666; font-size: 11px;')
         hint.setAlignment(Qt.AlignCenter)
@@ -768,13 +921,11 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _on_setup_done(self, camera_index: int, has_camera: bool, has_projector: bool):
-        """Called when user clicks Start on the setup page."""
-        self.camera_index    = camera_index
-        self.use_mock        = not has_camera
+        self.camera_index     = camera_index
+        self.use_mock         = not has_camera
         self._wants_projector = has_projector
 
         if has_camera and SCENE_AVAILABLE:
-            # Show calibration page and open its camera preview
             self._stack.setCurrentIndex(1)
             self.setMinimumSize(800, 520)
             self.statusBar().showMessage(
@@ -782,14 +933,11 @@ class BilliardsApp(QMainWindow):
             )
             self._calib_page.start_camera(camera_index)
         else:
-            # No camera or no Scene_Understanding — skip calibration
             self._on_calibration_done(None)
 
     def _on_calibration_done(self, H):
-        """Called by CalibrationPage when the user accepts / skips calibration."""
         if H is not None:
             self.cam_H = H.astype(np.float32)
-            # Cache for future "Use Last"
             _CACHE_DIR.mkdir(parents=True, exist_ok=True)
             np.save(_CAM_CACHE, self.cam_H)
             print(f'[GUI] Camera homography saved to cache: {_CAM_CACHE}')
@@ -797,13 +945,14 @@ class BilliardsApp(QMainWindow):
             self.cam_H = None
             print('[GUI] No camera calibration — using raw camera coordinates.')
 
-        # Projector calibration (blocks while running)
+        # Store table corners if they were accepted (not from cache / skip)
+        self._table_corners = self._calib_page.accepted_corners
+
         if self._wants_projector and self.cam_H is not None:
             self.statusBar().showMessage('Running projector calibration…')
             QApplication.processEvents()
             self._calibrate_projector_in_memory()
 
-        # Switch to main view
         self._stack.setCurrentIndex(2)
         self.setMinimumSize(900, 560)
         self._start_camera()
@@ -814,14 +963,14 @@ class BilliardsApp(QMainWindow):
         self.statusBar().showMessage('Ready — click a ball to select a target.')
 
     def _on_recalibrate(self):
-        """Return to calibration page from the main view."""
         if self._timer is not None:
             self._timer.stop()
         if self._cap is not None:
             self._cap.release()
             self._cap = None
-        self.cam_H     = None
+        self.cam_H      = None
         self.proj_H_inv = None
+        self._table_corners = None
         self._stack.setCurrentIndex(1)
         self.setMinimumSize(800, 520)
         self.statusBar().showMessage('Place 4 corners and click Accept.')
@@ -832,10 +981,6 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _calibrate_projector_in_memory(self):
-        """
-        Run ProjectorCalibrator without the user managing any files.
-        Passes self.cam_H via a temp file (automatically cleaned up).
-        """
         try:
             import billiards_calibration_merged as bcm
             tmp_dir  = tempfile.mkdtemp()
@@ -873,64 +1018,46 @@ class BilliardsApp(QMainWindow):
     def _start_timer(self):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_timer)
-        self._timer.start(33)  # ~30 fps
+        self._timer.start(33)   # ~30 fps
 
     # ─────────────────────────────────────────────────────────────────────────
     # Main timer callback
     # ─────────────────────────────────────────────────────────────────────────
 
     def _on_timer(self):
-        # ── Grab raw camera frame ─────────────────────────────────────────────
-        if not self.paused:
-            frame = self._grab_frame()
-            if frame is not None:
-                self.current_frame = frame
-                self.frozen_frame  = frame.copy()
-        else:
-            frame = self.frozen_frame
+        """Called every 33 ms by the QTimer.
+        When tick_callback is injected by main.py, delegate entirely to it.
+        Otherwise, show a minimal camera feed (no game logic) for standalone testing."""
+        if self._tick_callback is not None:
+            self._tick_callback()
+            return
 
+        # ── Standalone fallback (no game logic / trajectory) ─────────────────
+        frame = self.grab_frame()
         if frame is None:
             return
 
-        # ── Detection on warped frame (better accuracy when calibrated) ───────
-        detect_frame = (self._warp_to_top_down(frame)
-                        if self.cam_H is not None else frame)
+        top_down = self.cam_H is not None
+        canvas = self._warp_to_top_down(frame) if top_down else frame.copy()
 
-        balls = self._detect_or_mock(detect_frame)
-        self.current_balls = balls
-        self.cue_ball = next((b for b in balls if b.get('is_cue')), None)
-
-        if self.selected_ball is not None:
-            self.selected_ball = self._rematch_selection(self.selected_ball, balls)
-
-        # ── Pocket positions in the current display coordinate space ──────────
+        # Draw pocket markers on raw feed for visual reference
         pockets = self._get_pocket_positions(frame)
+        for pocket in pockets:
+            self._draw_pocket(canvas, pocket['cam_pos'])
 
-        # ── Compute paths ─────────────────────────────────────────────────────
-        self.cue_path, self.target_path = self._get_paths(pockets)
+        if self.paused:
+            cv2.putText(canvas, 'PAUSED', (10, 30),
+                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 200, 255), 2, cv2.LINE_AA)
 
-        # ── Render and display ────────────────────────────────────────────────
-        annotated = self._render_frame(
-            frame.copy(), balls, pockets, self.cue_path, self.target_path
-        )
         self.camera_label.setPixmap(
-            _bgr_to_pixmap(annotated).scaled(
+            _bgr_to_pixmap(canvas).scaled(
                 self.camera_label.width(), self.camera_label.height(),
                 Qt.KeepAspectRatio, Qt.SmoothTransformation
             )
         )
 
-        # ── Update projector window ───────────────────────────────────────────
-        if self.proj_window is not None and self.proj_window.isVisible():
-            proj_canvas = self._render_projection(
-                balls, pockets, self.cue_path, self.target_path
-            )
-            self.proj_window.update_frame(proj_canvas)
-
-        self._update_status_panel()
-
     # ─────────────────────────────────────────────────────────────────────────
-    # Frame acquisition
+    # Frame acquisition (internal helper)
     # ─────────────────────────────────────────────────────────────────────────
 
     def _grab_frame(self) -> Optional[np.ndarray]:
@@ -942,62 +1069,16 @@ class BilliardsApp(QMainWindow):
         return frame if ok else None
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Ball detection
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _detect_or_mock(self, frame: np.ndarray) -> List[Dict]:
-        """Run real detection if available; fall back to mock balls."""
-        if not self.use_mock and DETECTION_AVAILABLE:
-            try:
-                result = _detect_balls_impl(frame)
-                if result:
-                    return result
-            except Exception as exc:
-                print(f'[GUI] Detection error: {exc}')
-
-        # Mock: positions scaled to current frame size
-        h, w = frame.shape[:2]
-        return [
-            {'center': (int(w * 0.50), int(h * 0.50)), 'radius': 18, 'color': 'white',  'is_cue': True},
-            {'center': (int(w * 0.35), int(h * 0.38)), 'radius': 16, 'color': 'red',    'is_cue': False},
-            {'center': (int(w * 0.65), int(h * 0.33)), 'radius': 16, 'color': 'blue',   'is_cue': False},
-            {'center': (int(w * 0.28), int(h * 0.62)), 'radius': 16, 'color': 'yellow', 'is_cue': False},
-            {'center': (int(w * 0.72), int(h * 0.60)), 'radius': 16, 'color': 'green',  'is_cue': False},
-            {'center': (int(w * 0.55), int(h * 0.72)), 'radius': 16, 'color': 'purple', 'is_cue': False},
-        ]
-
-    def _rematch_selection(self, prev: Dict, balls: List[Dict]) -> Optional[Dict]:
-        """Re-find the previously selected ball by proximity."""
-        if not balls:
-            return None
-        px, py = prev['center']
-        best, best_d = None, float('inf')
-        for b in balls:
-            if b.get('is_cue'):
-                continue
-            cx, cy = b['center']
-            d = (cx - px) ** 2 + (cy - py) ** 2
-            if d < best_d:
-                best_d = d
-                best = b
-        return best if best_d < 2500 else None
-
-    # ─────────────────────────────────────────────────────────────────────────
     # Pocket positions — unified display-space coordinates
     # ─────────────────────────────────────────────────────────────────────────
 
     def _get_pocket_positions(self, raw_frame: np.ndarray) -> List[Dict]:
-        """
-        Return 6 pocket dicts, each with 'cam_pos' in the current display space.
-
-        • Top-down mode (cam_H set): positions are in warped display pixels
-          (table_cm × TABLE_DISPLAY_SCALE).  No camera transform needed.
-        • Raw mode: positions are in camera pixels via inverse cam_H or fractions.
-        """
+        """Return 6 pocket dicts each with 'cam_pos' in the current display space."""
         if self.cam_H is not None:
+            # Top-down mode: positions are table_cm × TABLE_DISPLAY_SCALE
             return [
                 {**p, 'cam_pos': (int(p['pos'][0] * TABLE_DISPLAY_SCALE),
-                                  int(p['pos'][1] * TABLE_DISPLAY_SCALE))}
+                                   int(p['pos'][1] * TABLE_DISPLAY_SCALE))}
                 for p in POCKET_POSITIONS_TABLE
             ]
         # Raw-frame fallback
@@ -1012,206 +1093,72 @@ class BilliardsApp(QMainWindow):
         return result
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Path calculation
+    # Game-state overlays (score panel and game-over screen)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _get_paths(self, pockets: List[Dict]) -> Tuple[List[Tuple], List[Tuple]]:
-        """
-        Return (cue_path, target_path) both in the current display coordinate space.
+    def _draw_score_panel(
+        self,
+        canvas:       np.ndarray,
+        stroke_count: int,
+        remaining:    List[str],
+    ) -> None:
+        """Draw a semi-transparent score panel in the top-right corner."""
+        h, w = canvas.shape[:2]
+        panel_w, panel_h = 200, 56
+        x0 = w - panel_w - 8
+        y0 = 8
+        # Semi-transparent background
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h),
+                      (20, 20, 50), -1)
+        cv2.addWeighted(overlay, 0.65, canvas, 0.35, 0, canvas)
+        cv2.rectangle(canvas, (x0, y0), (x0 + panel_w, y0 + panel_h),
+                      (80, 80, 160), 1)
+        cv2.putText(canvas, f'Strokes: {stroke_count}',
+                    (x0 + 8, y0 + 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
+        cv2.putText(canvas, f'Remaining: {len(remaining)}',
+                    (x0 + 8, y0 + 44),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
 
-        Top-down mode: coordinates are display pixels (table_cm × scale).
-        Raw mode:      coordinates are camera pixels.
-        """
-        if self.cue_ball is None or self.selected_ball is None:
-            return [], []
+    def _draw_game_over(
+        self,
+        canvas:       np.ndarray,
+        stroke_count: int,
+    ) -> None:
+        """Draw a game-over overlay on the canvas."""
+        h, w = canvas.shape[:2]
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (0, 0), (w, h), (10, 10, 30), -1)
+        cv2.addWeighted(overlay, 0.6, canvas, 0.4, 0, canvas)
 
-        top_down   = self.cam_H is not None
-        cue_disp   = self.cue_ball['center']
-        target_disp= self.selected_ball['center']
-        pocket_disp= self.selected_pocket['cam_pos'] if self.selected_pocket else None
+        # Title
+        text1 = 'GAME OVER'
+        (tw1, th1), _ = cv2.getTextSize(text1, cv2.FONT_HERSHEY_SIMPLEX, 2.0, 4)
+        cv2.putText(canvas, text1,
+                    ((w - tw1) // 2, h // 2 - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 200, 255), 4, cv2.LINE_AA)
 
-        # ── Convert to table cm ───────────────────────────────────────────────
-        if top_down:
-            S = TABLE_DISPLAY_SCALE
-            cue_t    = (cue_disp[0]    / S, cue_disp[1]    / S)
-            target_t = (target_disp[0] / S, target_disp[1] / S)
-        else:
-            cue_t    = self._camera_to_table(cue_disp)
-            target_t = self._camera_to_table(target_disp)
-
-        # ── Try real physics module (table cm in, table cm out) ────────────────
-        if PHYSICS_AVAILABLE:
-            try:
-                if cue_t and target_t:
-                    cue_d    = {**self.cue_ball,     'center': cue_t}
-                    target_d = {**self.selected_ball, 'center': target_t}
-                    pocket_d = None
-                    if self.selected_pocket:
-                        pocket_d = {**self.selected_pocket,
-                                    'center': self.selected_pocket['pos']}
-                    try:
-                        result = _calculate_path_impl(cue_d, target_d, pocket_d)
-                    except TypeError:
-                        result = _calculate_path_impl(cue_d, target_d)
-
-                    def _to_disp(pt_cm):
-                        if top_down:
-                            return (int(pt_cm[0] * TABLE_DISPLAY_SCALE),
-                                    int(pt_cm[1] * TABLE_DISPLAY_SCALE))
-                        p = self._table_to_camera(pt_cm)
-                        return p
-
-                    if isinstance(result, tuple) and len(result) == 2:
-                        cp_t, tp_t = result
-                        cp = [_to_disp(p) for p in cp_t]
-                        tp = [_to_disp(p) for p in tp_t]
-                        return [p for p in cp if p], [p for p in tp if p]
-                    else:
-                        cp = [_to_disp(p) for p in result]
-                        return ([p for p in cp if p],
-                                [target_disp, pocket_disp] if pocket_disp else [])
-            except Exception as exc:
-                print(f'[GUI] Physics error: {exc}')
-
-        # ── Geometric fallback (ghost-ball) ────────────────────────────────────
-        ball_r = BALL_RADIUS_TOP_DOWN if top_down else self.selected_ball.get('radius', 16)
-        cue_path: List[Tuple]    = []
-        target_path: List[Tuple] = []
-
-        if pocket_disp:
-            tx, ty = target_disp
-            px, py = pocket_disp
-            dx, dy = px - tx, py - ty
-            dist = (dx ** 2 + dy ** 2) ** 0.5
-            if dist > 0:
-                ux, uy = dx / dist, dy / dist
-                ghost = (int(tx - ux * 2 * ball_r), int(ty - uy * 2 * ball_r))
-                cue_path    = [cue_disp, ghost]
-                target_path = [target_disp, pocket_disp]
-            else:
-                cue_path = [cue_disp, target_disp]
-        else:
-            cx, cy = cue_disp
-            tx, ty = target_disp
-            cue_path = [
-                (int(cx + (tx - cx) * t / 9), int(cy + (ty - cy) * t / 9))
-                for t in range(10)
-            ]
-
-        return cue_path, target_path
-
-    @staticmethod
-    def _extend_path_backward(path: List[Tuple]) -> List[Tuple]:
-        """Prepend a backward extension so the aiming line continues past the cue."""
-        if len(path) < 2:
-            return path
-        p0x, p0y = float(path[0][0]),  float(path[0][1])
-        p1x, p1y = float(path[-1][0]), float(path[-1][1])
-        dx, dy   = p1x - p0x, p1y - p0y
-        dist     = (dx ** 2 + dy ** 2) ** 0.5
-        if dist < 1:
-            return path
-        ext    = min(dist, 150.0)
-        ux, uy = dx / dist, dy / dist
-        return [(int(p0x - ux * ext), int(p0y - uy * ext))] + list(path)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Top-down warp helpers
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _warp_to_top_down(self, frame: np.ndarray) -> np.ndarray:
-        """
-        Warp the raw camera frame to a rectified bird's-eye view.
-
-        cam_H maps camera pixels → table cm.  We compose it with a scale
-        matrix so the output is in display pixels (table_cm × TABLE_DISPLAY_SCALE).
-        """
-        w = int(config.TABLE_WIDTH_CM  * TABLE_DISPLAY_SCALE)
-        h = int(config.TABLE_HEIGHT_CM * TABLE_DISPLAY_SCALE)
-        S = np.array([[TABLE_DISPLAY_SCALE, 0, 0],
-                      [0, TABLE_DISPLAY_SCALE, 0],
-                      [0, 0,                  1]], dtype=np.float32)
-        return cv2.warpPerspective(frame, S @ self.cam_H, (w, h))
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Screen-mode rendering
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _render_frame(self, canvas: np.ndarray,
-                      balls: List[Dict],
-                      pockets: List[Dict],
-                      cue_path: List[Tuple],
-                      target_path: List[Tuple]) -> np.ndarray:
-        """
-        Draw overlays on the frame for screen-mode display.
-
-        When cam_H is set, the canvas is warped to a top-down view first and
-        all coordinates are already in display pixel space (balls detected on
-        the warped frame, pockets computed in warped space).
-        Without cam_H the raw camera frame is used as-is.
-        """
-        top_down = self.cam_H is not None
-
-        if top_down:
-            canvas = self._warp_to_top_down(canvas)
-            # Coordinates from detection and pocket computation are already in
-            # display pixel space — no extra transform needed.
-            ball_r_draw = BALL_RADIUS_TOP_DOWN
-        else:
-            ball_r_draw = 15
-
-        # 1. Target-ball → pocket trajectory (orange)
-        if len(target_path) >= 2:
-            self._draw_trajectory(
-                canvas, [(int(p[0]), int(p[1])) for p in target_path],
-                color=COLOR_TARGET_PATH)
-
-        # 2. Cue-ball → ghost-ball trajectory (cyan), extended backwards
-        if len(cue_path) >= 2:
-            extended = self._extend_path_backward(cue_path)
-            self._draw_trajectory(
-                canvas, [(int(p[0]), int(p[1])) for p in extended],
-                color=COLOR_TRAJECTORY)
-
-        # 3. Ghost-ball outline at contact point
-        if len(cue_path) >= 2 and self.selected_ball:
-            ghost = (int(cue_path[-1][0]), int(cue_path[-1][1]))
-            cv2.circle(canvas, ghost, ball_r_draw, COLOR_TRAJECTORY, 2, cv2.LINE_AA)
-
-        # 4. Pocket markers
-        for pocket in pockets:
-            is_sel = (self.selected_pocket is not None and
-                      pocket['name'] == self.selected_pocket['name'])
-            self._draw_pocket(canvas, pocket['cam_pos'], selected=is_sel)
-
-        # 5. Detected balls
-        for ball in balls:
-            cx, cy = ball['center']
-            self._draw_ball(
-                canvas,
-                center     = (int(cx), int(cy)),
-                radius     = ball_r_draw,
-                color_name = ball.get('color', 'gray'),
-                is_cue     = ball.get('is_cue', False),
-                selected   = (ball is self.selected_ball),
-            )
-
-        # 6. Pause indicator
-        if self.paused:
-            cv2.putText(canvas, 'PAUSED', (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 200, 255), 2, cv2.LINE_AA)
-
-        return canvas
+        # Score
+        text2 = f'Completed in {stroke_count} stroke{"s" if stroke_count != 1 else ""}!'
+        (tw2, _), _ = cv2.getTextSize(text2, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+        cv2.putText(canvas, text2,
+                    ((w - tw2) // 2, h // 2 + 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2, cv2.LINE_AA)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Projection-mode rendering  (black canvas in projector coordinates)
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _render_projection(self, balls: List[Dict],
-                           pockets: List[Dict],
-                           cue_path: List[Tuple],
-                           target_path: List[Tuple]) -> np.ndarray:
-        """Build a 1920×1080 black canvas with overlays for projection."""
+    def _render_projection_from_cm(
+        self,
+        balls:         List[Dict],
+        cue_path:      List[Tuple[float, float]],
+        target_path:   List[Tuple[float, float]],
+        selected_color: Optional[str],
+    ) -> np.ndarray:
+        """Build a 1920×1080 black canvas with overlays in projector coordinates.
+        All input paths are in table cm; balls have 'center_cm'."""
         canvas = np.zeros(
             (config.PROJECTOR_HEIGHT, config.PROJECTOR_WIDTH, 3), dtype=np.uint8
         )
@@ -1220,61 +1167,51 @@ class BilliardsApp(QMainWindow):
                         (300, 540), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 220), 4)
             return canvas
 
-        top_down = self.cam_H is not None
+        def to_proj(pt_cm: Tuple[float, float]) -> Optional[Tuple[int, int]]:
+            return self._table_to_projector(pt_cm)
 
-        def _disp_to_proj(pt):
-            """Convert display-space point to projector pixels."""
-            if top_down:
-                # display pixels → table cm → projector pixels
-                t = (pt[0] / TABLE_DISPLAY_SCALE, pt[1] / TABLE_DISPLAY_SCALE)
-            else:
-                t = self._camera_to_table(pt)
-            if t is None:
-                return None
-            return self._table_to_projector(t)
-
+        # Target path
         if len(target_path) >= 2:
-            tp_proj = [_disp_to_proj(p) for p in target_path]
+            tp_proj = [to_proj(p) for p in target_path]
             tp_proj = [p for p in tp_proj if p]
             if len(tp_proj) >= 2:
                 self._draw_trajectory(canvas, tp_proj, thickness=3,
                                       color=COLOR_TARGET_PATH)
 
+        # Cue path (extended backwards)
         if len(cue_path) >= 2:
-            ext = self._extend_path_backward(cue_path)
-            cp_proj = [_disp_to_proj(p) for p in ext]
+            cp_proj = [to_proj(p) for p in cue_path]
             cp_proj = [p for p in cp_proj if p]
             if len(cp_proj) >= 2:
-                self._draw_trajectory(canvas, cp_proj, thickness=3,
+                ext = self._extend_path_backward(cp_proj)
+                self._draw_trajectory(canvas, ext, thickness=3,
                                       color=COLOR_TRAJECTORY)
 
-        if len(cue_path) >= 2 and self.selected_ball:
-            ghost_proj = _disp_to_proj(cue_path[-1])
+        # Ghost-ball outline
+        if len(cue_path) >= 2 and selected_color is not None:
+            ghost_proj = to_proj(cue_path[-1])
             if ghost_proj:
                 cv2.circle(canvas, ghost_proj, 22, COLOR_TRAJECTORY, 2, cv2.LINE_AA)
 
-        for pocket in pockets:
-            proj_pt = self._table_to_projector(pocket['pos'])
+        # Pockets
+        for pocket in POCKET_POSITIONS_TABLE:
+            proj_pt = to_proj(pocket['pos'])
             if proj_pt:
-                is_sel = (self.selected_pocket is not None and
-                          pocket['name'] == self.selected_pocket['name'])
+                is_sel = (pocket['name'] == self._selected_pocket_name)
                 self._draw_pocket(canvas, proj_pt, selected=is_sel, radius=18)
 
+        # Balls
         for ball in balls:
-            if top_down:
-                t = (ball['center'][0] / TABLE_DISPLAY_SCALE,
-                     ball['center'][1] / TABLE_DISPLAY_SCALE)
-            else:
-                t = self._camera_to_table(ball['center'])
-            if t is None:
+            cm = ball.get('center_cm')
+            if cm is None:
                 continue
-            proj_pt = self._table_to_projector(t)
+            proj_pt = to_proj(cm)
             if proj_pt is None:
                 continue
             self._draw_ball(canvas, proj_pt, 22,
                             ball.get('color', 'gray'),
                             ball.get('is_cue', False),
-                            ball is self.selected_ball)
+                            ball.get('color') == selected_color and not ball.get('is_cue'))
 
         return canvas
 
@@ -1283,7 +1220,7 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _draw_ball(self, canvas, center, radius, color_name, is_cue, selected=False):
-        bgr    = BALL_COLORS_BGR.get(color_name.lower(), BALL_COLORS_BGR['gray'])
+        bgr    = BALL_COLORS_BGR.get(str(color_name).lower(), BALL_COLORS_BGR['gray'])
         border = (255, 255, 255) if is_cue else (40, 40, 40)
         cv2.circle(canvas, center, radius, bgr,    -1)
         cv2.circle(canvas, center, radius, border,  2)
@@ -1291,7 +1228,7 @@ class BilliardsApp(QMainWindow):
             cv2.circle(canvas, center, max(3, radius // 4), (200, 200, 200), -1)
         if selected:
             cv2.circle(canvas, center, radius + 6, COLOR_SELECTION, 3)
-        label = 'cue' if is_cue else color_name[:3]
+        label = 'cue' if is_cue else str(color_name)[:3]
         cv2.putText(canvas, label, (center[0] - 10, center[1] + radius + 14),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
 
@@ -1338,6 +1275,34 @@ class BilliardsApp(QMainWindow):
             ay = int(end_pt[1] - arr_len * np.sin(angle + delta))
             cv2.line(canvas, end_pt, (ax, ay), color, thickness + 1, cv2.LINE_AA)
 
+    @staticmethod
+    def _extend_path_backward(path: List[Tuple]) -> List[Tuple]:
+        """Prepend a backward extension so the aiming line continues past the cue."""
+        if len(path) < 2:
+            return path
+        p0x, p0y = float(path[0][0]),  float(path[0][1])
+        p1x, p1y = float(path[-1][0]), float(path[-1][1])
+        dx, dy   = p1x - p0x, p1y - p0y
+        dist     = (dx ** 2 + dy ** 2) ** 0.5
+        if dist < 1:
+            return path
+        ext    = min(dist, 150.0)
+        ux, uy = dx / dist, dy / dist
+        return [(int(p0x - ux * ext), int(p0y - uy * ext))] + list(path)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Top-down warp helper
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _warp_to_top_down(self, frame: np.ndarray) -> np.ndarray:
+        """Warp raw camera frame to bird's-eye display-pixel view."""
+        w = int(config.TABLE_WIDTH_CM  * TABLE_DISPLAY_SCALE)
+        h = int(config.TABLE_HEIGHT_CM * TABLE_DISPLAY_SCALE)
+        S = np.array([[TABLE_DISPLAY_SCALE, 0, 0],
+                      [0, TABLE_DISPLAY_SCALE, 0],
+                      [0, 0,                  1]], dtype=np.float32)
+        return cv2.warpPerspective(frame, S @ self.cam_H, (w, h))
+
     # ─────────────────────────────────────────────────────────────────────────
     # Coordinate transforms (camera ↔ table ↔ projector)
     # ─────────────────────────────────────────────────────────────────────────
@@ -1365,15 +1330,14 @@ class BilliardsApp(QMainWindow):
         return (int(res[0][0][0]), int(res[0][0][1]))
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Mouse click → ball / pocket selection
+    # Mouse click → ball click queuing / pocket selection
     # ─────────────────────────────────────────────────────────────────────────
 
     def _on_camera_click(self, label_x: int, label_y: int):
         """
-        Translate a label click to display-space coords, then find the nearest
-        ball or pocket.  In top-down mode, display coords are already the
-        working coordinate space (display pixels).  In raw mode, they map to
-        camera pixels.
+        Translate a label click to table coordinates.
+        • Pocket click  → store pocket selection in app (rendering hint).
+        • Ball-area click → enqueue (x_cm, y_cm) for main.py to handle.
         """
         frame = self.current_frame if self.current_frame is not None else self.frozen_frame
         if frame is None:
@@ -1383,7 +1347,6 @@ class BilliardsApp(QMainWindow):
         lh = self.camera_label.height()
         top_down = self.cam_H is not None
 
-        # Determine rendered frame size for letterbox computation
         if top_down:
             fw = int(config.TABLE_WIDTH_CM  * TABLE_DISPLAY_SCALE)
             fh = int(config.TABLE_HEIGHT_CM * TABLE_DISPLAY_SCALE)
@@ -1395,57 +1358,36 @@ class BilliardsApp(QMainWindow):
         off_y = (lh - fh * scale) / 2
         find_x = (label_x - off_x) / scale
         find_y = (label_y - off_y) / scale
-        # In both modes, find_x/find_y are now in the display coordinate space
-        # which matches ball['center'] and pocket['cam_pos'].
 
         pockets = self._get_pocket_positions(frame)
 
-        # 1. Check pockets
+        # ── Check pocket hit ──────────────────────────────────────────────────
         pocket_hit = self._find_pocket_at(find_x, find_y, pockets)
         if pocket_hit is not None:
-            if (self.selected_pocket is not None and
-                    pocket_hit['name'] == self.selected_pocket['name']):
-                self._on_reset()
-                self.statusBar().showMessage('Selection cleared.')
+            if pocket_hit['name'] == self._selected_pocket_name:
+                # Toggle off
+                self._selected_pocket_name = None
+                self._selected_pocket_cm   = None
+                self.statusBar().showMessage('Pocket deselected — using auto-selection.')
             else:
-                self.selected_pocket = pocket_hit
+                self._selected_pocket_name = pocket_hit['name']
+                self._selected_pocket_cm   = pocket_hit['pos']  # table cm tuple
                 self.statusBar().showMessage(
-                    f'Pocket selected: {pocket_hit["name"]}. Now click a target ball.')
-                self._update_status_panel()
+                    f'Pocket override: {pocket_hit["name"]}. Click same pocket to deselect.'
+                )
             return
 
-        # 2. Check balls
-        ball_hit = self._find_ball_at(find_x, find_y)
-        if ball_hit is None:
-            self.selected_ball   = None
-            self.selected_pocket = None
-            self.cue_path        = []
-            self.target_path     = []
-            self.statusBar().showMessage('Click a ball to select a target, or a ◆ pocket.')
-        elif ball_hit.get('is_cue'):
-            self.statusBar().showMessage('Cannot select the cue ball as target.')
-        elif ball_hit is self.selected_ball:
-            self._on_reset()
-            self.statusBar().showMessage('Selection cleared.')
-            return
+        # ── Translate click to table cm and enqueue for main.py ──────────────
+        if top_down:
+            x_cm = find_x / TABLE_DISPLAY_SCALE
+            y_cm = find_y / TABLE_DISPLAY_SCALE
         else:
-            self.selected_ball = ball_hit
-            color = ball_hit.get('color', '?')
-            if self.selected_pocket:
-                self.statusBar().showMessage(
-                    f'Target: {color} ball → {self.selected_pocket["name"]} pocket.')
-            else:
-                self.statusBar().showMessage(
-                    f'Target: {color} ball. Now click a ◆ pocket to aim.')
-        self._update_status_panel()
+            result = self._camera_to_table((find_x, find_y))
+            if result is None:
+                return
+            x_cm, y_cm = result
 
-    def _find_ball_at(self, x: float, y: float) -> Optional[Dict]:
-        for ball in self.current_balls:
-            cx, cy = ball['center']
-            r = ball.get('radius', BALL_RADIUS_TOP_DOWN if self.cam_H else 15)
-            if (x - cx) ** 2 + (y - cy) ** 2 <= (r + 8) ** 2:
-                return ball
-        return None
+        self._pending_clicks.append((x_cm, y_cm))
 
     def _find_pocket_at(self, x: float, y: float,
                         pockets: List[Dict]) -> Optional[Dict]:
@@ -1472,12 +1414,11 @@ class BilliardsApp(QMainWindow):
         self.btn_capture.setStyleSheet('')
 
     def _on_reset(self):
-        self.selected_ball   = None
-        self.selected_pocket = None
-        self.cue_path        = []
-        self.target_path     = []
-        self._update_status_panel()
-        self.statusBar().showMessage('Selection cleared.')
+        """Clear the manual pocket selection. Ball selection is cleared by main.py."""
+        self._pending_clicks.clear()
+        self._selected_pocket_name = None
+        self._selected_pocket_cm   = None
+        self.statusBar().showMessage('Pocket selection cleared — using auto-selection.')
 
     def _on_toggle_mode(self):
         if self.mode == MODE_SCREEN:
@@ -1515,17 +1456,16 @@ class BilliardsApp(QMainWindow):
         self.lbl_calib.setText(
             f'Calibration: {"OK" if self.cam_H is not None else "none"}'
         )
-        self.lbl_balls.setText(f'Balls: {len(self.current_balls)}')
-        self.lbl_cue.setText('Cue: found' if self.cue_ball else 'Cue: not found')
+        self.lbl_strokes.setText(f'Strokes: {self._last_stroke_count}')
+        self.lbl_remaining.setText(f'Remaining: {len(self._last_remaining)}')
         self.lbl_target.setText(
-            f'Target: {self.selected_ball.get("color","?") if self.selected_ball else "none"}'
+            f'Target: {self._last_selected_color or "none"}'
         )
         self.lbl_pocket.setText(
-            f'Pocket: {self.selected_pocket["name"] if self.selected_pocket else "none"}'
+            f'Pocket: {self._selected_pocket_name or "auto"}'
         )
         self.lbl_detect.setText(
-            'Detection: mock' if (self.use_mock or not DETECTION_AVAILABLE)
-            else 'Detection: real'
+            f'State: {self._last_game_state.replace("_", " ").title()}'
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1534,7 +1474,7 @@ class BilliardsApp(QMainWindow):
 
     def keyPressEvent(self, event):
         key = event.key()
-        if self._stack.currentIndex() == 2:   # only in main view
+        if self._stack.currentIndex() == 2:
             if key in (Qt.Key_Q, Qt.Key_Escape):
                 self.close()
             elif key == Qt.Key_Space:
@@ -1553,7 +1493,6 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
-        # Stop calibration page camera/timer if still running
         self._calib_page._stop_camera()
         if self._timer is not None:
             self._timer.stop()
@@ -1565,7 +1504,7 @@ class BilliardsApp(QMainWindow):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Module-level draw_overlay  (Project_Plan.md interface)
+# Module-level draw_overlay  (Project_Plan.md interface — unchanged)
 # ═════════════════════════════════════════════════════════════════════════════
 
 def draw_overlay(image: np.ndarray,
@@ -1574,13 +1513,14 @@ def draw_overlay(image: np.ndarray,
     """
     Pure-OpenCV rendering — no Qt window, no run loop.
     Returns a copy of *image* with balls and trajectory drawn on it.
+    Expects balls[i]['center'] in image-pixel coordinates.
     """
     canvas = image.copy()
     if len(path) >= 2:
         _draw_trajectory_static(canvas, [(int(p[0]), int(p[1])) for p in path])
     for ball in balls:
         cx, cy = ball['center']
-        bgr    = BALL_COLORS_BGR.get(ball.get('color','gray').lower(),
+        bgr    = BALL_COLORS_BGR.get(str(ball.get('color', 'gray')).lower(),
                                      BALL_COLORS_BGR['gray'])
         radius = ball.get('radius', 15)
         is_cue = ball.get('is_cue', False)
@@ -1590,7 +1530,7 @@ def draw_overlay(image: np.ndarray,
                    (255, 255, 255) if is_cue else (40, 40, 40), 2)
         if is_cue:
             cv2.circle(canvas, center, max(3, radius // 4), (200, 200, 200), -1)
-        cv2.putText(canvas, 'cue' if is_cue else ball.get('color','gray')[:3],
+        cv2.putText(canvas, 'cue' if is_cue else str(ball.get('color', 'gray'))[:3],
                     (center[0] - 10, center[1] + radius + 14),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
     return canvas
@@ -1623,15 +1563,16 @@ def _draw_trajectory_static(canvas: np.ndarray,
                 cv2.line(canvas, a, b, COLOR_TRAJECTORY, thickness, cv2.LINE_AA)
             drawn += chunk
             dash   = not dash
-    end_pt  = path_px[-1]
-    prev_pt = path_px[-2]
-    dx, dy  = end_pt[0] - prev_pt[0], end_pt[1] - prev_pt[1]
-    angle   = np.arctan2(dy, dx)
-    for delta in (+0.42, -0.42):
-        ax = int(end_pt[0] - 16 * np.cos(angle + delta))
-        ay = int(end_pt[1] - 16 * np.sin(angle + delta))
-        cv2.line(canvas, end_pt, (ax, ay), COLOR_TRAJECTORY,
-                 thickness + 1, cv2.LINE_AA)
+    if len(path_px) >= 2:
+        end_pt  = path_px[-1]
+        prev_pt = path_px[-2]
+        dx, dy  = end_pt[0] - prev_pt[0], end_pt[1] - prev_pt[1]
+        angle   = np.arctan2(dy, dx)
+        for delta in (+0.42, -0.42):
+            ax = int(end_pt[0] - 16 * np.cos(angle + delta))
+            ay = int(end_pt[1] - 16 * np.sin(angle + delta))
+            cv2.line(canvas, end_pt, (ax, ay), COLOR_TRAJECTORY,
+                     thickness + 1, cv2.LINE_AA)
 
 
 def _bgr_to_pixmap(frame: np.ndarray) -> QPixmap:
@@ -1655,7 +1596,7 @@ def _make_mock_frame(width: int = 640, height: int = 480) -> np.ndarray:
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName('Billiards Assistance System')
-    window = BilliardsApp()
+    window = BilliardsApp()   # no tick_callback → standalone fallback mode
     window.show()
     sys.exit(app.exec_())
 

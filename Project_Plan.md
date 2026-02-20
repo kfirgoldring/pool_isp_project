@@ -224,6 +224,91 @@ Error: no circles detected after HoughCircles."
 
 ---
 
+## Coordinate System Contract
+
+All modules share four distinct coordinate spaces. Each module may only read/write the spaces listed in its column.
+
+| Space | Unit | Range | Used by | Notes |
+|---|---|---|---|---|
+| **Camera pixels** | px | 0..frame_w × 0..frame_h | `Ball_Detection.py` output, `app.py` click→table transform | Raw camera frame, NOT warped |
+| **Table centimeters** | cm | X: 0..122, Y: 0..61 | `golf_game.py`, `trajectory.py`, `main.py` adapter, `app.render()` inputs | Origin = top-left pocket |
+| **Display pixels** | px | 0..976 × 0..488 | `app.py` rendering internals only | Table cm × `TABLE_DISPLAY_SCALE` (8) |
+| **Projector pixels** | px | 0..1920 × 0..1080 | `app.py` projection output only | Via `proj_H_inv` homography |
+
+### Rules
+
+1. **`main.py` is the only module that converts camera pixels → table cm.**
+   This conversion uses `cam_H` (the camera→table homography) via `cv2.perspectiveTransform`.
+   The adapter function `_adapt_detections(raw, cam_H)` does this conversion.
+
+2. **`golf_game.py` and `trajectory.py` never see camera pixels or display pixels.**
+   Every argument they receive is already in table centimeters.
+
+3. **`app.py` converts table cm → display px internally** (multiply by `TABLE_DISPLAY_SCALE = 8`).
+   No other module performs this conversion.
+
+4. **Pocket positions are always derived from table dimensions** — never hardcoded as arbitrary numbers:
+
+   ```python
+   TABLE_WIDTH_CM  = 122.0
+   TABLE_HEIGHT_CM = 61.0
+   # 6 pockets: corners + mid-long-edges
+   POCKET_POSITIONS_CM = [
+       (k * TABLE_WIDTH_CM / 2, j * TABLE_HEIGHT_CM)
+       for j in (0, 1) for k in (0, 1, 2)
+   ]
+   # → [(0,0), (61,0), (122,0), (0,61), (61,61), (122,61)]
+   ```
+
+### Architecture (as-implemented)
+
+```
+main.py  ←→  app.py          (grab_frame, render, consume_pending_clicks)
+  │
+  ├── Ball_Detection.py       detect_balls_with_color(frame, table_corners, ...)
+  │   └─ returns (N,3) numpy: [x_cam_px, y_cam_px, color_str]
+  │
+  ├── _adapt_detections()     converts numpy → List[Dict] with center_cm
+  │
+  ├── golf_game.py            GolfGame.update(balls)      — all cm
+  └── trajectory.py           calculate_path / suggest_best_shot  — all cm
+```
+
+### Ball detection interface (`Ball_Detection.py`)
+
+```python
+detect_balls_with_color(
+    frame_bgr:      np.ndarray,
+    table_corners:  Optional[Iterable],   # 4 camera-pixel corner points
+    ref_path:       str = "ref.jpeg",     # empty-table reference image
+    table_size_cm:  Optional[Tuple[float,float]] = None,
+) -> np.ndarray   # shape (N, 3): [[x_cam_px, y_cam_px, color_str], ...]
+```
+
+Ball colors returned: `'white'`, `'orange'`, `'yellow'`, `'blue'`, `'bordeaux'`, `'unknown'`
+
+**Important:** `Ball_Detection.py` must **not** be modified. It takes raw camera frames and corner points; it does not apply any homography.
+
+### Adapter layer (`main.py → _adapt_detections`)
+
+```python
+def _adapt_detections(raw: np.ndarray, cam_H: Optional[np.ndarray]) -> List[Dict]:
+    # Converts detect_balls_with_color() output to internal dict format.
+    # Each output dict:
+    #   'center':    (int, int)              # camera pixel coords
+    #   'center_cm': (float, float) | None   # table cm coords (via cam_H)
+    #   'color':     str
+    #   'is_cue':    bool  (color == 'white')
+    #   'radius':    int   (fixed at 18 px — Ball_Detection does not expose this)
+```
+
+### Flags for real-world validation
+
+- **`MOVEMENT_THRESHOLD_CM = 0.625`** — derived from 5 px / 8 px-per-cm. Must be validated with real camera footage before finalising.
+- **`ref.jpeg`** — Ball_Detection requires an empty-table reference image at the project root. Confirm filename with Person 1 before deployment.
+
+---
+
 ## Resources
 
 - Hough Circle Transform: https://docs.opencv.org/4.x/d4/d70/tutorial_hough_circle.html
