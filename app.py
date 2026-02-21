@@ -60,6 +60,7 @@ from PyQt5.QtGui import QImage, QPixmap, QFont
 _CACHE_DIR  = pathlib.Path.home() / '.billiards_assistant'
 _CAM_CACHE  = str(_CACHE_DIR / 'camera_homography.npy')
 _PROJ_CACHE = str(_CACHE_DIR / 'projector_homography.npy')
+_REF_CACHE  = str(_CACHE_DIR / 'ref.jpeg')
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Constants
@@ -340,8 +341,6 @@ class CalibrationPage(QWidget):
         self._frame      = None
         self._corners    : List         = []
         self._drag_idx   : int          = -1
-        self._camera_idx : int          = 0
-        # Stored after Accept — accessible by BilliardsApp to get table_corners
         self.accepted_corners: Optional[np.ndarray] = None
         self._build()
 
@@ -400,20 +399,17 @@ class CalibrationPage(QWidget):
         btn_row.addWidget(self._btn_skip)
         layout.addLayout(btn_row)
 
-    def start_camera(self, camera_index: int):
-        self._camera_idx = camera_index
-        self._corners    = []
-        self._drag_idx   = -1
-        self._frame      = None
+    def start_camera(self, cap):
+        """Begin live preview using a shared cv2.VideoCapture."""
+        self._corners  = []
+        self._drag_idx = -1
+        self._frame    = None
         self._update_corner_label()
 
-        self._cap = cv2.VideoCapture(camera_index)
-        if not self._cap.isOpened():
-            self._cam_label.setText(f'Cannot open camera {camera_index}')
+        self._cap = cap
+        if self._cap is None or not self._cap.isOpened():
+            self._cam_label.setText('Camera not available')
             return
-
-        for _ in range(5):
-            self._cap.read()
 
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_timer)
@@ -423,9 +419,6 @@ class CalibrationPage(QWidget):
         if self._timer is not None:
             self._timer.stop()
             self._timer = None
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
 
     def _on_timer(self):
         if self._cap is None or not self._cap.isOpened():
@@ -514,13 +507,28 @@ class CalibrationPage(QWidget):
             self._lbl_corners.setText('Auto-detect failed — click corners manually')
 
     def _on_accept(self):
-        if len(self._corners) != 4 or not SCENE_AVAILABLE:
+        if len(self._corners) != 4:
             return
         corners_arr = np.array(self._corners, dtype=np.float32)
-        # Store corners for BilliardsApp to read via .accepted_corners
         self.accepted_corners = corners_arr.copy()
-        H = compute_homography_from_corners(corners_arr)
+        if SCENE_AVAILABLE:
+            H = compute_homography_from_corners(corners_arr)
+        else:
+            H = self._compute_homography_fallback(corners_arr)
         self._finish(H)
+
+    @staticmethod
+    def _compute_homography_fallback(corners: np.ndarray) -> np.ndarray:
+        """Compute camera->table_cm homography without Scene_Understanding."""
+        src = corners.reshape(4, 2).astype(np.float32)
+        dst = np.array([
+            [0.0,                    0.0],
+            [config.TABLE_WIDTH_CM,  0.0],
+            [config.TABLE_WIDTH_CM,  config.TABLE_HEIGHT_CM],
+            [0.0,                    config.TABLE_HEIGHT_CM],
+        ], dtype=np.float32)
+        H, _ = cv2.findHomography(src, dst)
+        return H.astype(np.float32)
 
     def _on_use_last(self):
         if not os.path.exists(_CAM_CACHE):
@@ -540,6 +548,126 @@ class CalibrationPage(QWidget):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# ReferencePage — capture an empty-table reference image (page 2)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class ReferencePage(QWidget):
+    """
+    Shows a live camera preview and asks the user to clear the table,
+    then capture a reference frame used for background subtraction.
+    Emits reference_done(ref_path: str | None).
+    """
+    reference_done = pyqtSignal(object)  # str path or None
+
+    def __init__(self):
+        super().__init__()
+        self._cap   = None
+        self._timer = None
+        self._frame = None
+        self._build()
+
+    def _build(self):
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        header = QLabel('Reference Capture — Remove all objects from the table')
+        header.setAlignment(Qt.AlignCenter)
+        header.setStyleSheet('color: #e94560; font-size: 13px; font-weight: bold;')
+        layout.addWidget(header)
+
+        self._instructions = QLabel(
+            'Clear the table completely (no balls, no cue).\n'
+            'This frame will be used for background subtraction during ball detection.\n'
+            'When the table is empty, click "Capture Reference".'
+        )
+        self._instructions.setAlignment(Qt.AlignCenter)
+        self._instructions.setStyleSheet('color: #888; font-size: 11px;')
+        layout.addWidget(self._instructions)
+
+        self._cam_label = QLabel()
+        self._cam_label.setAlignment(Qt.AlignCenter)
+        self._cam_label.setStyleSheet(
+            'background-color: #0a0a1a; border: 2px solid #0f3460; border-radius: 4px;'
+        )
+        self._cam_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._cam_label.setText('Starting camera…')
+        layout.addWidget(self._cam_label, stretch=1)
+
+        self._lbl_status = QLabel('')
+        self._lbl_status.setAlignment(Qt.AlignCenter)
+        self._lbl_status.setStyleSheet('font-size: 12px; color: #aaa;')
+        layout.addWidget(self._lbl_status)
+
+        btn_row = QHBoxLayout()
+        self._btn_capture = QPushButton('Capture Reference')
+        self._btn_last    = QPushButton('Use Last')
+        self._btn_skip    = QPushButton('Skip')
+
+        self._btn_last.setEnabled(os.path.exists(_REF_CACHE))
+
+        self._btn_capture.clicked.connect(self._on_capture)
+        self._btn_last.clicked.connect(self._on_use_last)
+        self._btn_skip.clicked.connect(self._on_skip)
+
+        btn_row.addWidget(self._btn_capture)
+        btn_row.addWidget(self._btn_last)
+        btn_row.addWidget(self._btn_skip)
+        layout.addLayout(btn_row)
+
+    def start_camera(self, cap):
+        """Begin live preview using a shared cv2.VideoCapture."""
+        self._frame = None
+        self._cap = cap
+        if self._cap is None or not self._cap.isOpened():
+            self._cam_label.setText('Camera not available')
+            return
+
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._on_timer)
+        self._timer.start(33)
+
+    def _stop_camera(self):
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+
+    def _on_timer(self):
+        if self._cap is None or not self._cap.isOpened():
+            return
+        ok, frame = self._cap.read()
+        if not ok:
+            return
+        self._frame = frame
+        pixmap = _bgr_to_pixmap(frame)
+        self._cam_label.setPixmap(
+            pixmap.scaled(self._cam_label.width(), self._cam_label.height(),
+                          Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
+
+    def _on_capture(self):
+        if self._frame is None:
+            self._lbl_status.setText('No frame available — wait for camera.')
+            return
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cv2.imwrite(_REF_CACHE, self._frame)
+        self._lbl_status.setText(f'Reference saved.')
+        print(f'[GUI] Reference image saved to: {_REF_CACHE}')
+        self._stop_camera()
+        self.reference_done.emit(_REF_CACHE)
+
+    def _on_use_last(self):
+        if not os.path.exists(_REF_CACHE):
+            return
+        self._stop_camera()
+        self.reference_done.emit(_REF_CACHE)
+
+    def _on_skip(self):
+        self._stop_camera()
+        self.reference_done.emit(None)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # BilliardsApp — main PyQt5 application window
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -547,10 +675,11 @@ class BilliardsApp(QMainWindow):
     """
     Main application window.
 
-    Three-page flow:
+    Four-page flow:
       0 → SetupPage       (hardware selection)
       1 → CalibrationPage (camera calibration)
-      2 → Main view       (camera feed + overlays)
+      2 → ReferencePage   (capture empty-table reference image)
+      3 → Main view       (camera feed + overlays)
 
     Integration with main.py:
       Pass tick_callback to __init__. It is called every 33 ms by the QTimer.
@@ -579,6 +708,9 @@ class BilliardsApp(QMainWindow):
         # ── Table corners (camera px; stored during calibration) ─────────────
         self._table_corners: Optional[np.ndarray] = None   # shape (4, 2) float32
 
+        # ── Reference image path (set by ReferencePage) ──────────────────────
+        self.ref_path: Optional[str] = None
+
         # ── Pending user clicks (table cm coordinates, drained by main.py) ───
         self._pending_clicks: List[Tuple[float, float]] = []
 
@@ -600,6 +732,7 @@ class BilliardsApp(QMainWindow):
         self._last_remaining    : List[str] = []
         self._last_game_state   : str       = 'WAITING_FOR_SHOT'
         self._last_selected_color: Optional[str] = None
+        self._last_tracker_state : str       = 'TRACKING'
 
         # ── Build UI ─────────────────────────────────────────────────────────
         self._build_ui()
@@ -642,6 +775,7 @@ class BilliardsApp(QMainWindow):
         stroke_count:   int,
         remaining:      List[str],
         selected_color: Optional[str] = None,
+        tracker_state:  str = 'TRACKING',
     ) -> None:
         """
         Draw overlays on the frame and push to the camera label.
@@ -667,6 +801,7 @@ class BilliardsApp(QMainWindow):
         self._last_remaining     = remaining
         self._last_game_state    = game_state
         self._last_selected_color = selected_color
+        self._last_tracker_state = tracker_state
 
         # ── Produce display-space (pixel) canvas ──────────────────────────────
         if top_down:
@@ -799,6 +934,10 @@ class BilliardsApp(QMainWindow):
         self._calib_page.calibration_done.connect(self._on_calibration_done)
         self._stack.addWidget(self._calib_page)
 
+        self._ref_page = ReferencePage()
+        self._ref_page.reference_done.connect(self._on_reference_done)
+        self._stack.addWidget(self._ref_page)
+
         self._stack.addWidget(self._build_main_ui())
 
         self._stack.setCurrentIndex(0)
@@ -847,9 +986,8 @@ class BilliardsApp(QMainWindow):
 
         self.lbl_strokes   = self._make_status_label('Strokes: 0')
         self.lbl_remaining = self._make_status_label('Remaining: —')
-        self.lbl_target    = self._make_status_label('Target: none')
         self.lbl_pocket    = self._make_status_label('Pocket: auto')
-        for lbl in (self.lbl_strokes, self.lbl_remaining, self.lbl_target, self.lbl_pocket):
+        for lbl in (self.lbl_strokes, self.lbl_remaining, self.lbl_pocket):
             sb.addWidget(lbl)
 
         sb.addWidget(self._make_divider())
@@ -858,10 +996,11 @@ class BilliardsApp(QMainWindow):
         hdr2.setStyleSheet('color: #888; font-size: 10px; letter-spacing: 1px;')
         sb.addWidget(hdr2)
 
-        self.lbl_mode   = self._make_status_label('Mode: Screen')
-        self.lbl_calib  = self._make_status_label('Calibration: none')
-        self.lbl_detect = self._make_status_label('Detection: waiting')
-        for lbl in (self.lbl_mode, self.lbl_calib, self.lbl_detect):
+        self.lbl_mode    = self._make_status_label('Mode: Screen')
+        self.lbl_calib   = self._make_status_label('Calibration: none')
+        self.lbl_detect  = self._make_status_label('Detection: waiting')
+        self.lbl_tracker = self._make_status_label('Tracker: Tracking')
+        for lbl in (self.lbl_mode, self.lbl_calib, self.lbl_detect, self.lbl_tracker):
             sb.addWidget(lbl)
 
         sb.addWidget(self._make_divider())
@@ -891,8 +1030,7 @@ class BilliardsApp(QMainWindow):
         sb.addStretch()
 
         hint = QLabel(
-            '① Click a ball to select target.\n'
-            '② Click a ◆ pocket to aim manually.\n'
+            'Click a ◆ pocket to aim manually.\n'
             'Right-click to clear pocket.'
         )
         hint.setStyleSheet('color: #666; font-size: 11px;')
@@ -925,13 +1063,24 @@ class BilliardsApp(QMainWindow):
         self.use_mock         = not has_camera
         self._wants_projector = has_projector
 
-        if has_camera and SCENE_AVAILABLE:
+        if has_camera:
+            self._cap = cv2.VideoCapture(camera_index)
+            if not self._cap.isOpened():
+                print(f'[GUI] Cannot open camera {camera_index}. Falling back to mock.')
+                self._cap = None
+                self.use_mock = True
+                self._on_calibration_done(None)
+                return
+            # Let auto-exposure / white-balance settle
+            for _ in range(5):
+                self._cap.read()
+
             self._stack.setCurrentIndex(1)
             self.setMinimumSize(800, 520)
             self.statusBar().showMessage(
                 'Place 4 table corners or click Auto-detect, then Accept.'
             )
-            self._calib_page.start_camera(camera_index)
+            self._calib_page.start_camera(self._cap)
         else:
             self._on_calibration_done(None)
 
@@ -945,7 +1094,6 @@ class BilliardsApp(QMainWindow):
             self.cam_H = None
             print('[GUI] No camera calibration — using raw camera coordinates.')
 
-        # Store table corners if they were accepted (not from cache / skip)
         self._table_corners = self._calib_page.accepted_corners
 
         if self._wants_projector and self.cam_H is not None:
@@ -953,7 +1101,26 @@ class BilliardsApp(QMainWindow):
             QApplication.processEvents()
             self._calibrate_projector_in_memory()
 
+        if self.use_mock:
+            self._on_reference_done(None)
+            return
+
+        # Proceed to reference capture page (same camera session)
         self._stack.setCurrentIndex(2)
+        self.statusBar().showMessage(
+            'Clear the table and capture a reference image for ball detection.'
+        )
+        self._ref_page.start_camera(self._cap)
+
+    def _on_reference_done(self, ref_path):
+        if ref_path is not None:
+            self.ref_path = str(ref_path)
+            print(f'[GUI] Using reference image: {self.ref_path}')
+        else:
+            self.ref_path = None
+            print('[GUI] No reference image — ball detection may be degraded.')
+
+        self._stack.setCurrentIndex(3)
         self.setMinimumSize(900, 560)
         self._start_camera()
         self._start_timer()
@@ -965,16 +1132,14 @@ class BilliardsApp(QMainWindow):
     def _on_recalibrate(self):
         if self._timer is not None:
             self._timer.stop()
-        if self._cap is not None:
-            self._cap.release()
-            self._cap = None
         self.cam_H      = None
         self.proj_H_inv = None
+        self.ref_path   = None
         self._table_corners = None
         self._stack.setCurrentIndex(1)
         self.setMinimumSize(800, 520)
         self.statusBar().showMessage('Place 4 corners and click Accept.')
-        self._calib_page.start_camera(self.camera_index)
+        self._calib_page.start_camera(self._cap)
 
     # ─────────────────────────────────────────────────────────────────────────
     # Projector calibration (in-memory, temp file hidden from user)
@@ -1010,9 +1175,8 @@ class BilliardsApp(QMainWindow):
         if self.use_mock:
             print('[GUI] Mock mode — no camera opened.')
             return
-        self._cap = cv2.VideoCapture(self.camera_index)
-        if not self._cap.isOpened():
-            print(f'[GUI] WARNING: Cannot open camera {self.camera_index}. Falling back to mock.')
+        if self._cap is None or not self._cap.isOpened():
+            print('[GUI] WARNING: Camera not available. Falling back to mock.')
             self.use_mock = True
 
     def _start_timer(self):
@@ -1458,14 +1622,14 @@ class BilliardsApp(QMainWindow):
         )
         self.lbl_strokes.setText(f'Strokes: {self._last_stroke_count}')
         self.lbl_remaining.setText(f'Remaining: {len(self._last_remaining)}')
-        self.lbl_target.setText(
-            f'Target: {self._last_selected_color or "none"}'
-        )
         self.lbl_pocket.setText(
             f'Pocket: {self._selected_pocket_name or "auto"}'
         )
         self.lbl_detect.setText(
-            f'State: {self._last_game_state.replace("_", " ").title()}'
+            f'Game: {self._last_game_state.replace("_", " ").title()}'
+        )
+        self.lbl_tracker.setText(
+            f'Tracker: {self._last_tracker_state.title()}'
         )
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1474,7 +1638,7 @@ class BilliardsApp(QMainWindow):
 
     def keyPressEvent(self, event):
         key = event.key()
-        if self._stack.currentIndex() == 2:
+        if self._stack.currentIndex() == 3:
             if key in (Qt.Key_Q, Qt.Key_Escape):
                 self.close()
             elif key == Qt.Key_Space:
@@ -1493,11 +1657,15 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def closeEvent(self, event):
+        # Stop all page timers
         self._calib_page._stop_camera()
+        self._ref_page._stop_camera()
         if self._timer is not None:
             self._timer.stop()
+        # Single camera release point
         if self._cap is not None:
             self._cap.release()
+            self._cap = None
         if self.proj_window is not None:
             self.proj_window.close()
         event.accept()

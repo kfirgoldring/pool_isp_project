@@ -1,33 +1,43 @@
-import matplotlib.pyplot as plt
 import cv2
 import numpy as np
 
+import config
+
+
 def detect_table_green(img):
-    # Pre-processing: Blur to reduce noise
     blurred = cv2.GaussianBlur(img, (7, 7), 0)
-    # Convert to HSV
     hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 
-    # Define the Green Threshold
-    # Hue: 35-85 covers most green shades
-    # Saturation: 40-255 filters out gray/white noise
-    # Value: 40-255 filters out very dark shadows
     lower_green = np.array([60, 0, 0])
     upper_green = np.array([85, 255, 255])
 
-    # Create the binary mask
     mask = cv2.inRange(hsv, lower_green, upper_green)
 
     return mask
 
 
-def get_table_corners(image_path):
+def get_table_corners(image):
+    """Detect the 4 table corners from an image.
 
-    img = cv2.imread(image_path)
-    if img is None:
+    Parameters
+    ----------
+    image : str or numpy.ndarray
+        Either a file path (str) or a BGR numpy array.
+
+    Returns
+    -------
+    numpy.ndarray of shape (4, 2) with corner order
+    [top-left, top-right, bottom-right, bottom-left], or None on failure.
+    """
+    if isinstance(image, str):
+        img = cv2.imread(image)
+        if img is None:
+            return None
+    elif isinstance(image, np.ndarray):
+        img = image
+    else:
         return None
-    
-    # Load and mask the image
+
     mask = detect_table_green(img)
 
     if mask is None or mask.size == 0:
@@ -72,6 +82,30 @@ def get_table_corners(image_path):
         cv2.circle(vis_img_2, (int(x), int(y)), 10, (0, 0, 255), -1) # Red dots
     
     return rect
+
+
+def compute_homography_from_corners(corners: np.ndarray) -> np.ndarray:
+    """Compute camera-pixel -> table-cm homography from 4 corner points.
+
+    Parameters
+    ----------
+    corners : (4, 2) float32 array of camera-pixel corner coordinates,
+              ordered [top-left, top-right, bottom-right, bottom-left].
+
+    Returns
+    -------
+    (3, 3) float32 homography matrix mapping camera pixels to table cm.
+    """
+    src = np.array(corners, dtype=np.float32).reshape(4, 2)
+    dst = np.array([
+        [0.0,                  0.0],
+        [config.TABLE_WIDTH_CM,  0.0],
+        [config.TABLE_WIDTH_CM,  config.TABLE_HEIGHT_CM],
+        [0.0,                  config.TABLE_HEIGHT_CM],
+    ], dtype=np.float32)
+    H, _ = cv2.findHomography(src, dst)
+    return H.astype(np.float32)
+
 
 # Utility function to show the histogram of the Hue channel
 def show_hue_histogram():
