@@ -63,6 +63,8 @@ class BallDetectionConfig:
         black_dark_ratio_min: float = 0.45,
         black_sat_for_dark: int = 110,
         black_inner_scale: float = 0.7,
+        max_balls: int = 5,
+        detection_mode: str = 'both',
     ) -> None:
         # HSV thresholds for green table (will be adapted around dominant hue)
         self.green_hue_window = green_hue_window
@@ -100,6 +102,8 @@ class BallDetectionConfig:
         self.black_dark_ratio_min = black_dark_ratio_min
         self.black_sat_for_dark = black_sat_for_dark
         self.black_inner_scale = black_inner_scale
+        self.max_balls = max_balls
+        self.detection_mode = detection_mode
 
 
 def _order_points_clockwise(pts: np.ndarray) -> np.ndarray:
@@ -464,34 +468,35 @@ def detect_balls(
         max_r = 40
         min_dist = 20
 
-    circles = cv2.HoughCircles(
-        gray,
-        cv2.HOUGH_GRADIENT,
-        dp=cfg.hough_dp,
-        minDist=min_dist,
-        param1=cfg.hough_param1,
-        param2=cfg.hough_param2,
-        minRadius=min_r,
-        maxRadius=max_r,
-    )
-
     detections: List[BallDetection] = []
-    if circles is not None:
-        circles = np.squeeze(circles, axis=0)
-        for x, y, r in circles:
-            if _circle_diff_ratio(diff_mask, (x, y), r) < cfg.non_green_ratio:
-                continue#ignore green circles which are likely to be the noise, not balls.
-            x0 = int(round(x - r))
-            y0 = int(round(y - r))
-            w = int(round(2 * r))
-            h = int(round(2 * r))
-            detections.append(
-                BallDetection(center=(float(x), float(y)), radius_px=float(r), bbox=(x0, y0, w, h))
-            )
-    detections = []
+    use_hough   = cfg.detection_mode in ('hough', 'both')
+    use_contour = cfg.detection_mode in ('contour', 'both')
 
-    # Fallback to contour-based detection on diff mask
-    if not detections:
+    if use_hough:
+        circles = cv2.HoughCircles(
+            gray,
+            cv2.HOUGH_GRADIENT,
+            dp=cfg.hough_dp,
+            minDist=min_dist,
+            param1=cfg.hough_param1,
+            param2=cfg.hough_param2,
+            minRadius=min_r,
+            maxRadius=max_r,
+        )
+        if circles is not None:
+            circles = np.squeeze(circles, axis=0)
+            for x, y, r in circles:
+                if _circle_non_green_ratio(diff_mask, (x, y), r) < cfg.non_green_ratio:
+                    continue
+                x0 = int(round(x - r))
+                y0 = int(round(y - r))
+                w = int(round(2 * r))
+                h = int(round(2 * r))
+                detections.append(
+                    BallDetection(center=(float(x), float(y)), radius_px=float(r), bbox=(x0, y0, w, h))
+                )
+
+    if use_contour and (not detections or cfg.detection_mode == 'contour'):
         contours, _ = cv2.findContours(diff_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         for cnt in contours:
             area = cv2.contourArea(cnt)
@@ -527,6 +532,13 @@ def detect_balls(
         if u < edge or u > 1.0 - edge or v < edge or v > 1.0 - edge:
             continue
         filtered.append(d)
+
+    if cfg.max_balls > 0 and len(filtered) > cfg.max_balls:
+        filtered.sort(
+            key=lambda d: _circle_non_green_ratio(diff_mask, d.center, d.radius_px),
+            reverse=True,
+        )
+        filtered = filtered[:cfg.max_balls]
 
     return filtered
 

@@ -74,10 +74,11 @@ class _BallTracker:
                 the tracker transitions to DISTURBED.
                 Ball_Detection is NOT called in this state.
 
-    DISTURBED — something changed on the table (hand, shot, etc.).
+    DISTURBED — something is moving on the table (hand, cue, shot).
+                Ball_Detection is NOT called.  A cheap frame-diff watches
+                for motion to *stop*.  After ``quiet_frames`` consecutive
+                quiet frames the tracker transitions to SETTLING.
                 Output stays frozen to the pre-disturbance snapshot.
-                Ball_Detection IS called so the tracker can watch for the
-                disturbance to clear (excess detections drop).
 
     SETTLING  — disturbance cleared; re-acquiring ball positions.
                 Ball_Detection IS called; new tracks are built.
@@ -96,8 +97,8 @@ class _BallTracker:
         confirm_frames:   int   = 3,
         stale_frames:     int   = 5,
         dead_zone_cm:     float = 1.0,
-        excess_threshold: int   = 3,
         settle_frames:    int   = 10,
+        quiet_frames:     int   = 5,
     ):
         self._tracks:          List[Dict] = []
         self._match_radius:    float      = match_radius_cm
@@ -105,14 +106,15 @@ class _BallTracker:
         self._confirm_frames:  int        = confirm_frames
         self._stale_frames:    int        = stale_frames
         self._dead_zone:       float      = dead_zone_cm
-        self._excess_thresh:   int        = excess_threshold
         self._settle_required: int        = settle_frames
+        self._quiet_required:  int        = quiet_frames
 
         self._state:           str        = _TRK_SETTLING
         self._stable_snapshot: List[Dict] = []
         self._pre_disturb_snapshot: List[Dict] = []
         self._expected_count:  int        = 0
         self._settle_count:    int        = 0
+        self._quiet_count:     int        = 0
         self._ref_frame: Optional[np.ndarray] = None
 
     # ── public: called every tick from _run_tick ────────────────────────────
@@ -120,67 +122,61 @@ class _BallTracker:
     @property
     def needs_detection(self) -> bool:
         """True when the orchestrator should run Ball_Detection this tick."""
-        return self._state != _TRK_TRACKING
+        return self._state == _TRK_SETTLING
 
-    def check_frame(self, frame: np.ndarray) -> None:
-        """Cheap motion check (TRACKING only). Transitions to DISTURBED
-        if the frame differs significantly from the reference."""
+    def check_motion(self, frame: np.ndarray) -> None:
+        """Cheap frame-diff motion check (TRACKING and DISTURBED states).
+
+        TRACKING  → DISTURBED  when motion is detected.
+        DISTURBED → SETTLING   after ``quiet_frames`` consecutive quiet frames.
+        """
         if self._ref_frame is None:
             self._ref_frame = frame.copy()
+            self._quiet_count = 0
             return
 
         diff = cv2.absdiff(frame, self._ref_frame)
         gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY) if diff.ndim == 3 else diff
         changed = int(np.count_nonzero(gray > _MOTION_DIFF_THRESH))
         total   = gray.shape[0] * gray.shape[1]
+        has_motion = total > 0 and changed / total > _MOTION_PIXEL_FRAC
 
-        if total > 0 and changed / total > _MOTION_PIXEL_FRAC:
-            self._pre_disturb_snapshot = list(self._stable_snapshot)
-            self._state = _TRK_DISTURBED
-            self._settle_count = 0
-            self._ref_frame = None
-
-    def update(self, raw_balls: List[Dict]) -> List[Dict]:
-        """Process raw detections (DISTURBED / SETTLING only)."""
-
-        n_confirmed  = sum(1 for t in self._tracks if t['age'] >= self._confirm_frames)
-        expected     = max(n_confirmed, self._expected_count)
-        n_raw        = sum(1 for b in raw_balls if b.get('center_cm') is not None)
-        excess       = (n_raw - expected) if expected > 0 else 0
-        is_disturbed = expected > 0 and excess >= self._excess_thresh
-
-        # ── DISTURBED ───────────────────────────────────────────────────────
-        if self._state == _TRK_DISTURBED:
-            self._do_tracking(raw_balls, create_new=False)
-            if not is_disturbed:
-                self._state = _TRK_SETTLING
-                self._settle_count = 1
-            return list(self._stable_snapshot)
-
-        # ── SETTLING ────────────────────────────────────────────────────────
-        if self._state == _TRK_SETTLING:
-            self._do_tracking(raw_balls, create_new=True)
-            if is_disturbed:
+        if self._state == _TRK_TRACKING:
+            if has_motion:
+                self._pre_disturb_snapshot = list(self._stable_snapshot)
                 self._state = _TRK_DISTURBED
                 self._settle_count = 0
-                return list(self._stable_snapshot)
-
-            self._settle_count += 1
-            if self._settle_count >= self._settle_required:
-                new_snapshot = self._emit_confirmed()
-                if self._snapshot_changed(self._pre_disturb_snapshot, new_snapshot):
-                    self._stable_snapshot = new_snapshot
-                else:
-                    # No real change — keep old snapshot so game sees no jump
-                    pass
-                self._expected_count = len(self._stable_snapshot)
-                self._state = _TRK_TRACKING
+                self._quiet_count = 0
                 self._ref_frame = None
-                return list(self._stable_snapshot)
+        elif self._state == _TRK_DISTURBED:
+            if has_motion:
+                self._quiet_count = 0
+                self._ref_frame = frame.copy()
+            else:
+                self._quiet_count += 1
+                if self._quiet_count >= self._quiet_required:
+                    self._state = _TRK_SETTLING
+                    self._settle_count = 0
+                    self._ref_frame = None
 
+    def update(self, raw_balls: List[Dict]) -> List[Dict]:
+        """Process raw detections (SETTLING only)."""
+
+        if self._state != _TRK_SETTLING:
             return list(self._stable_snapshot)
 
-        # Should not reach here during TRACKING (check_frame handles it)
+        self._do_tracking(raw_balls, create_new=True)
+
+        self._settle_count += 1
+        if self._settle_count >= self._settle_required:
+            new_snapshot = self._emit_confirmed()
+            if self._snapshot_changed(self._pre_disturb_snapshot, new_snapshot):
+                self._stable_snapshot = new_snapshot
+            self._expected_count = len(self._stable_snapshot)
+            self._state = _TRK_TRACKING
+            self._ref_frame = None
+            return list(self._stable_snapshot)
+
         return list(self._stable_snapshot)
 
     def get_snapshot(self) -> List[Dict]:
@@ -346,21 +342,23 @@ def _run_tick(window, game: GolfGame, tracker: _BallTracker) -> None:
     if frame is None:
         return
 
+    det_cfg = getattr(window, 'detection_config', None)
+
     if window.use_mock:
         balls = _detect_balls(
             frame, window.cam_H, window.table_corners,
-            window.ref_path, True,
+            window.ref_path, True, det_cfg,
         )
     elif tracker.needs_detection:
-        # DISTURBED or SETTLING — run the expensive detection pipeline
+        # SETTLING — run the expensive detection pipeline
         raw_balls = _detect_balls(
             frame, window.cam_H, window.table_corners,
-            window.ref_path, False,
+            window.ref_path, False, det_cfg,
         )
         balls = tracker.update(raw_balls)
     else:
-        # TRACKING — no detection; cheap frame-diff for motion
-        tracker.check_frame(frame)
+        # TRACKING or DISTURBED — cheap frame-diff only
+        tracker.check_motion(frame)
         balls = tracker.get_snapshot()
 
     # 2. Advance game state machine
@@ -424,6 +422,7 @@ def _detect_balls(
     table_corners: Optional[np.ndarray],
     ref_path:      Optional[str] = None,
     use_mock:      bool = False,
+    config:        object = None,
 ) -> List[Dict]:
     """
     Run ball detection and convert to internal dict format.
@@ -447,6 +446,7 @@ def _detect_balls(
                 table_corners = table_corners,
                 ref_path      = ref_path,
                 table_size_cm = (TABLE_WIDTH_CM, TABLE_HEIGHT_CM),
+                config        = config,
             )
             if raw is not None and len(raw) > 0:
                 return _adapt_detections(raw, cam_H)

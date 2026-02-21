@@ -44,11 +44,14 @@ try:
 except (ImportError, AttributeError):
     SCENE_AVAILABLE = False
 
+from Ball_Detection import BallDetectionConfig
+
 # ── PyQt5 imports ─────────────────────────────────────────────────────────────
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QFrame, QSizePolicy, QStatusBar,
     QStackedWidget, QCheckBox, QSpinBox, QGroupBox,
+    QDoubleSpinBox, QComboBox, QScrollArea,
 )
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QFont
@@ -711,6 +714,9 @@ class BilliardsApp(QMainWindow):
         # ── Reference image path (set by ReferencePage) ──────────────────────
         self.ref_path: Optional[str] = None
 
+        # ── Detection config (mutated live by sidebar settings panel) ─────
+        self.detection_config = BallDetectionConfig()
+
         # ── Pending user clicks (table cm coordinates, drained by main.py) ───
         self._pending_clicks: List[Tuple[float, float]] = []
 
@@ -965,7 +971,7 @@ class BilliardsApp(QMainWindow):
 
         # ── Right: sidebar ────────────────────────────────────────────────────
         sidebar = QWidget()
-        sidebar.setFixedWidth(210)
+        sidebar.setFixedWidth(240)
         sb = QVBoxLayout(sidebar)
         sb.setContentsMargins(4, 4, 4, 4)
         sb.setSpacing(6)
@@ -1027,10 +1033,24 @@ class BilliardsApp(QMainWindow):
         for btn in (self.btn_capture, self.btn_reset, self.btn_mode, self.btn_recalib):
             sb.addWidget(btn)
 
-        sb.addStretch()
+        sb.addWidget(self._make_divider())
+
+        self._det_toggle_btn = QPushButton('Detection Settings ▸')
+        self._det_toggle_btn.setStyleSheet('text-align: left; padding: 3px 6px; font-size: 10px;')
+        self._det_settings_widget = self._build_detection_settings()
+        self._det_settings_widget.setVisible(False)
+        self._det_toggle_btn.clicked.connect(self._toggle_detection_settings)
+        sb.addWidget(self._det_toggle_btn)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._det_settings_widget)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setStyleSheet('background: transparent;')
+        sb.addWidget(scroll, stretch=1)
 
         hint = QLabel(
-            'Click a ◆ pocket to aim manually.\n'
+            'Click a pocket to aim manually.\n'
             'Right-click to clear pocket.'
         )
         hint.setStyleSheet('color: #666; font-size: 11px;')
@@ -1053,6 +1073,88 @@ class BilliardsApp(QMainWindow):
         line.setFrameShadow(QFrame.Sunken)
         line.setStyleSheet('color: #0f3460;')
         return line
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Detection settings panel (collapsible sidebar section)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _toggle_detection_settings(self):
+        vis = not self._det_settings_widget.isVisible()
+        self._det_settings_widget.setVisible(vis)
+        self._det_toggle_btn.setText('Detection Settings ▾' if vis else 'Detection Settings ▸')
+
+    def _build_detection_settings(self) -> QWidget:
+        cfg = self.detection_config
+        widget = QWidget()
+        lay = QVBoxLayout(widget)
+        lay.setContentsMargins(0, 4, 0, 0)
+        lay.setSpacing(4)
+
+        lbl_style = 'font-size: 10px; color: #aaa;'
+        spin_style = 'font-size: 10px;'
+
+        def _add_label(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet(lbl_style)
+            lay.addWidget(lbl)
+
+        def _add_double(attr, lo, hi, step, decimals=2):
+            sb = QDoubleSpinBox()
+            sb.setRange(lo, hi)
+            sb.setSingleStep(step)
+            sb.setDecimals(decimals)
+            sb.setValue(getattr(cfg, attr))
+            sb.setStyleSheet(spin_style)
+            sb.valueChanged.connect(lambda v, a=attr: setattr(cfg, a, v))
+            lay.addWidget(sb)
+            return sb
+
+        def _add_int(attr, lo, hi, step=1):
+            sb = QSpinBox()
+            sb.setRange(lo, hi)
+            sb.setSingleStep(step)
+            sb.setValue(getattr(cfg, attr))
+            sb.setStyleSheet(spin_style)
+            sb.valueChanged.connect(lambda v, a=attr: setattr(cfg, a, v))
+            lay.addWidget(sb)
+            return sb
+
+        # -- Detection mode
+        _add_label('Detection Mode')
+        mode_combo = QComboBox()
+        mode_combo.setStyleSheet(spin_style)
+        mode_combo.addItems(['Both (Hough + Contour)', 'Hough Only', 'Contour Only'])
+        _mode_map = {'both': 0, 'hough': 1, 'contour': 2}
+        _mode_rev = {0: 'both', 1: 'hough', 2: 'contour'}
+        mode_combo.setCurrentIndex(_mode_map.get(cfg.detection_mode, 0))
+        mode_combo.currentIndexChanged.connect(
+            lambda idx: setattr(cfg, 'detection_mode', _mode_rev.get(idx, 'both'))
+        )
+        lay.addWidget(mode_combo)
+
+        # -- Hough parameters
+        _add_label('Hough dp')
+        _add_double('hough_dp', 1.0, 3.0, 0.1)
+        _add_label('Hough param1')
+        _add_double('hough_param1', 10.0, 300.0, 5.0, 1)
+        _add_label('Hough param2')
+        _add_double('hough_param2', 5.0, 50.0, 1.0, 1)
+
+        # -- Contour parameters
+        _add_label('Min Circularity')
+        _add_double('min_circularity', 0.0, 1.0, 0.05)
+        _add_label('Min Area (px)')
+        _add_int('min_area_px', 10, 500, 10)
+
+        # -- Common parameters
+        _add_label('Non-green Ratio')
+        _add_double('non_green_ratio', 0.0, 1.0, 0.05)
+        _add_label('Edge Margin')
+        _add_double('edge_margin', 0.0, 0.20, 0.01)
+        _add_label('Max Balls')
+        _add_int('max_balls', 1, 15)
+
+        return widget
 
     # ─────────────────────────────────────────────────────────────────────────
     # Pipeline flow — setup → calibration → main
