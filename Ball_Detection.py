@@ -48,7 +48,7 @@ class BallDetectionConfig:
         min_circularity: float = 0.6,
         min_area_px: int = 60,
         non_green_ratio: float = 0.3,
-        edge_margin: float = 0.03,
+        edge_margin: float = 0.05,
         hue_similarity_thresh: float = 10.0,
         # Color classification thresholds (HSV
         yellow_hue: Tuple[int, int] = (10, 20),
@@ -478,6 +478,8 @@ def detect_balls(
 
     detections: List[BallDetection] = []
 
+
+
     if circles is not None:
         circles = np.squeeze(circles, axis=0)
         for x, y, r in circles:
@@ -490,6 +492,7 @@ def detect_balls(
             detections.append(
                 BallDetection(center=(float(x), float(y)), radius_px=float(r), bbox=(x0, y0, w, h))
             )
+    detections = []
 
     # Fallback to contour-based detection on diff mask
     if not detections:
