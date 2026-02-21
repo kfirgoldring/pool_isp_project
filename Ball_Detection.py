@@ -338,12 +338,11 @@ def _classify_color(
 
 def _estimate_ball_radius_px(
     corners: np.ndarray,
-    ball_diameter_cm:None,
-    table_size_cm: None
+    ball_diameter_cm:1.5,
+    table_size_cm: 120.0,
 ) -> Optional[float]:
     if ball_diameter_cm is None or table_size_cm is None:
         return None
-
     corners = _order_points_clockwise(corners)
     # Edge lengths in px
     top = np.linalg.norm(corners[1] - corners[0])
@@ -359,10 +358,10 @@ def _estimate_ball_radius_px(
     return 0.5 * ball_diameter_cm * px_per_cm
 
 
-def _circle_non_green_ratio(
-    non_green_mask: np.ndarray, center: Tuple[float, float], radius: float
+def _circle_diff_ratio(
+    diff_mask: np.ndarray, center: Tuple[float, float], radius: float
 ) -> float:
-    h, w = non_green_mask.shape
+    h, w = diff_mask.shape
     x, y = int(round(center[0])), int(round(center[1]))
     r = int(round(radius))
     if r <= 0:
@@ -373,7 +372,7 @@ def _circle_non_green_ratio(
         return 0.0
     roi = np.zeros((y1 - y0 + 1, x1 - x0 + 1), dtype=np.uint8)
     cv2.circle(roi, (x - x0, y - y0), r, 255, -1)
-    region = non_green_mask[y0 : y1 + 1, x0 : x1 + 1]
+    region = diff_mask[y0 : y1 + 1, x0 : x1 + 1]
     total = np.count_nonzero(roi)
     if total == 0:
         return 0.0
@@ -477,13 +476,10 @@ def detect_balls(
     )
 
     detections: List[BallDetection] = []
-
-
-
     if circles is not None:
         circles = np.squeeze(circles, axis=0)
         for x, y, r in circles:
-            if _circle_non_green_ratio(diff_mask, (x, y), r) < cfg.non_green_ratio:
+            if _circle_diff_ratio(diff_mask, (x, y), r) < cfg.non_green_ratio:
                 continue#ignore green circles which are likely to be the noise, not balls.
             x0 = int(round(x - r))
             y0 = int(round(y - r))
@@ -603,7 +599,6 @@ def draw_detections(
 if __name__ == "__main__":
     ref_path="ref.jpeg"
     img_path="img_1.jpeg"
-
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
