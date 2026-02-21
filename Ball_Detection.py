@@ -46,7 +46,7 @@ class BallDetectionConfig:
         hough_param1: float = 120.0,
         hough_param2: float = 14.0,
         min_circularity: float = 0.4,
-        min_area_px: int = 200,
+        min_area_ratio: float = 0.002,
         diff_ratio: float = 0.3,
         edge_margin: float = 0,
         hue_similarity_thresh: float = 10.0,
@@ -80,7 +80,7 @@ class BallDetectionConfig:
         self.hough_param2 = hough_param2
         # Fallback contour filtering
         self.min_circularity = min_circularity
-        self.min_area_px = min_area_px
+        self.min_area_ratio = min_area_ratio
         # Non-green coverage threshold for circle filtering
         self.diff_ratio = diff_ratio
         # Edge filter margin in normalized table coordinates
@@ -377,6 +377,7 @@ def detect_balls(
     if ref_bgr.shape[:2] != frame_bgr.shape[:2]:
         raise ValueError("Reference and current frame must have the same resolution.")
     corners_arr = _order_points_clockwise(corners_arr)
+    table_area_px = float(abs(cv2.contourArea(corners_arr)))
     table_mask = _table_mask(frame_bgr.shape, corners_arr)
     # Mild blur on both sides suppresses per-frame sensor noise / compression
     # artifacts that cause flickering false positives in video.
@@ -408,12 +409,13 @@ def detect_balls(
         min_r = 8
         max_r = 40
         min_dist = 20
+    min_area_px = cfg.min_area_ratio * table_area_px
 #contour-based detection on diff mask
     contours, _ = cv2.findContours(diff_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     detections: List[BallDetection] = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
-        if area < cfg.min_area_px:
+        if area < min_area_px:
             continue
         perimeter = cv2.arcLength(cnt, True)
         if perimeter <= 1e-3:
@@ -519,10 +521,12 @@ if __name__ == "__main__":
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
     cfg = BallDetectionConfig()
+    print("min_area_ratio", cfg.min_area_ratio)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     corners = _load_table_corners_from_scene_understanding(ref_path)
     if corners is None:
         raise SystemExit("Failed to load corners from Scene_Understanding")
+    table_area_px = float(abs(cv2.contourArea(corners)))
     dets = detect_balls(img, table_corners=corners, ref_path=ref_path, config=cfg)
     colored = detect_balls_with_color(img, table_corners=corners, ref_path=ref_path, config=cfg)
     vis = draw_detections(img, dets)
@@ -547,6 +551,7 @@ if __name__ == "__main__":
         median_hue = _median_hue_in_bbox(hsv, d.bbox, cfg.green_min_sat, cfg.green_min_val)
         x, y, w, h = d.bbox
         px_area = w * h
-        print(i, d.center, d.bbox, d.radius_px, "px_area", px_area, "median_hue", median_hue)
+        ratio = (px_area / table_area_px) if table_area_px > 0 else 0.0
+        print(i, d.center, d.bbox, d.radius_px, "px_area", px_area, "ratio", ratio, "median_hue", median_hue)
     print("colored detections:")
     print(colored)
