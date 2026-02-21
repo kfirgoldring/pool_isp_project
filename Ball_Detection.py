@@ -156,48 +156,6 @@ def _green_mask(
         mask1 = cv2.inRange(hsv, lower2, upper2) | cv2.inRange(hsv, lower3, upper3)
 
     return cv2.bitwise_and(mask1, table_mask)
-
-def _mean_hue_in_bbox(
-    hsv: np.ndarray,
-    bbox: BBox,
-    min_sat: int,
-    min_val: int,
-) -> Optional[float]:
-    '''
-    calculate mean hue value  in a given bbox
-    :param hsv:
-    :param bbox:
-    :param min_sat:
-    :param min_val:
-    :return:
-    '''
-    x, y, w, h = bbox
-    h_img, w_img = hsv.shape[:2]
-    x0 = max(0, x)
-    y0 = max(0, y)
-    x1 = min(w_img, x + w)
-    y1 = min(h_img, y + h)
-    if x1 <= x0 or y1 <= y0:
-        return None
-    roi = hsv[y0:y1, x0:x1]
-    h_ch = roi[:, :, 0]
-    s_ch = roi[:, :, 1]
-    v_ch = roi[:, :, 2]
-    valid = (s_ch >= min_sat) & (v_ch >= min_val)
-    if not np.any(valid):
-        return None
-    hues = h_ch[valid].astype(np.float32)
-    angles = hues * (2.0 * np.pi / 180.0)
-    mean_x = float(np.mean(np.cos(angles)))
-    mean_y = float(np.mean(np.sin(angles)))
-    if mean_x == 0.0 and mean_y == 0.0:
-        return None
-    angle = float(np.arctan2(mean_y, mean_x))
-    if angle < 0.0:
-        angle += 2.0 * np.pi
-    return float(angle * (180.0 / (2.0 * np.pi)))
-
-
 def _median_hue_in_bbox(
     hsv: np.ndarray,
     bbox: BBox,
