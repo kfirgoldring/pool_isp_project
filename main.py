@@ -9,7 +9,7 @@ Pipeline (called every 33 ms via QTimer):
   3. _adapt_detections(...)         — convert to internal dict format with center_cm
   4. game.update(balls)             — advance state machine
   5. app.consume_pending_clicks()   — process user ball-selection clicks
-  6. calculate_path / suggest_best_shot — compute trajectory in table cm
+  6. suggest_best_shot — compute trajectory in table cm
   7. app.render(...)                — draw overlays and display
 
 Coordinate system rule:
@@ -29,7 +29,7 @@ from golf_game import (
     GolfGame,
     STATE_WAITING,
 )
-from trajectory import calculate_path, suggest_best_shot
+from trajectory import suggest_best_shot
 
 # ── Table constants (keep in sync with golf_game.py / trajectory.py) ─────────
 TABLE_WIDTH_CM  = 122.0
@@ -91,13 +91,15 @@ class _BallTracker:
 
     def __init__(
         self,
-        match_radius_cm:  float = 5.0,
-        ema_alpha:        float = 0.4,
-        confirm_frames:   int   = 3,
-        stale_frames:     int   = 5,
-        dead_zone_cm:     float = 1.0,
-        excess_threshold: int   = 3,
-        settle_frames:    int   = 10,
+        match_radius_cm:       float = 5.0,
+        ema_alpha:             float = 0.4,
+        confirm_frames:        int   = 3,
+        stale_frames:          int   = 5,
+        dead_zone_cm:          float = 1.0,
+        excess_threshold:      int   = 3,
+        settle_frames:         int   = 10,
+        uniform_detection:     bool  = False,
+        tracking_detect_every: int   = 5,
     ):
         self._tracks:          List[Dict] = []
         self._match_radius:    float      = match_radius_cm
@@ -107,24 +109,41 @@ class _BallTracker:
         self._dead_zone:       float      = dead_zone_cm
         self._excess_thresh:   int        = excess_threshold
         self._settle_required: int        = settle_frames
+        self._uniform:         bool       = uniform_detection
+        self._tracking_interval: int      = max(1, tracking_detect_every)
 
         self._state:           str        = _TRK_SETTLING
         self._stable_snapshot: List[Dict] = []
         self._pre_disturb_snapshot: List[Dict] = []
         self._expected_count:  int        = 0
         self._settle_count:    int        = 0
+        self._tick_count:      int        = 0
         self._ref_frame: Optional[np.ndarray] = None
+
+    def advance_tick(self) -> None:
+        """Increment the internal tick counter (call once per frame)."""
+        self._tick_count += 1
 
     # ── public: called every tick from _run_tick ────────────────────────────
 
     @property
     def needs_detection(self) -> bool:
         """True when the orchestrator should run Ball_Detection this tick."""
-        return self._state != _TRK_TRACKING
+        if self._uniform:
+            return True
+        if self._state == _TRK_SETTLING:
+            return True
+        if self._state == _TRK_TRACKING:
+            return self._tick_count % self._tracking_interval == 0
+        return False
 
     def check_frame(self, frame: np.ndarray) -> None:
-        """Cheap motion check (TRACKING only). Transitions to DISTURBED
-        if the frame differs significantly from the reference."""
+        """Cheap frame-diff motion check for TRACKING and DISTURBED states.
+
+        TRACKING  + motion  -> DISTURBED
+        DISTURBED + no motion -> SETTLING  (table is calm, re-acquire balls)
+        DISTURBED + motion  -> stay DISTURBED (update reference for next check)
+        """
         if self._ref_frame is None:
             self._ref_frame = frame.copy()
             return
@@ -133,15 +152,34 @@ class _BallTracker:
         gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY) if diff.ndim == 3 else diff
         changed = int(np.count_nonzero(gray > _MOTION_DIFF_THRESH))
         total   = gray.shape[0] * gray.shape[1]
+        has_motion = total > 0 and changed / total > _MOTION_PIXEL_FRAC
 
-        if total > 0 and changed / total > _MOTION_PIXEL_FRAC:
-            self._pre_disturb_snapshot = list(self._stable_snapshot)
-            self._state = _TRK_DISTURBED
-            self._settle_count = 0
-            self._ref_frame = None
+        if self._state == _TRK_TRACKING:
+            if has_motion:
+                self._pre_disturb_snapshot = list(self._stable_snapshot)
+                self._state = _TRK_DISTURBED
+                self._settle_count = 0
+                self._ref_frame = None
+        elif self._state == _TRK_DISTURBED:
+            if has_motion:
+                self._ref_frame = frame.copy()
+            else:
+                self._state = _TRK_SETTLING
+                self._settle_count = 0
+                self._ref_frame = None
 
     def update(self, raw_balls: List[Dict]) -> List[Dict]:
-        """Process raw detections (DISTURBED / SETTLING only)."""
+        """Process raw detections and return the current ball list."""
+
+        # ── TRACKING (periodic background detection) ─────────────────────────
+        if self._state == _TRK_TRACKING:
+            self._do_tracking(raw_balls, create_new=True)
+            new_snapshot = self._emit_confirmed()
+            if new_snapshot and self._snapshot_changed(self._stable_snapshot, new_snapshot):
+                self._pre_disturb_snapshot = list(self._stable_snapshot)
+                self._stable_snapshot = new_snapshot
+                self._expected_count = len(self._stable_snapshot)
+            return list(self._stable_snapshot)
 
         n_confirmed  = sum(1 for t in self._tracks if t['age'] >= self._confirm_frames)
         expected     = max(n_confirmed, self._expected_count)
@@ -180,7 +218,6 @@ class _BallTracker:
 
             return list(self._stable_snapshot)
 
-        # Should not reach here during TRACKING (check_frame handles it)
         return list(self._stable_snapshot)
 
     def get_snapshot(self) -> List[Dict]:
@@ -322,6 +359,8 @@ def main() -> None:
         _run_tick(window, game, tracker)
 
     window = BilliardsApp(tick_callback=on_tick)
+    window.game = game
+    window._last_balls = []
     _ctx['window'] = window
     window.show()
 
@@ -336,15 +375,18 @@ def _run_tick(window, game: GolfGame, tracker: _BallTracker) -> None:
     """
     Single orchestration tick, called every 33 ms.
 
-    Detection is only active when the tracker is NOT in TRACKING state.
-    During TRACKING the table is idle — a cheap frame-diff watches for
-    motion and the frozen snapshot is reused.
+    Detection rate depends on tracker mode:
+      - Uniform:  detection every tick in all states.
+      - Variable: every tick in SETTLING, every N ticks in TRACKING,
+                  never in DISTURBED.
     """
 
     # 1. Grab raw camera frame
     frame = window.grab_frame()
     if frame is None:
         return
+
+    tracker.advance_tick()
 
     if window.use_mock:
         balls = _detect_balls(
@@ -363,6 +405,8 @@ def _run_tick(window, game: GolfGame, tracker: _BallTracker) -> None:
         tracker.check_frame(frame)
         balls = tracker.get_snapshot()
 
+    window._last_balls = balls
+
     # 2. Advance game state machine
     game.update(balls)
 
@@ -378,27 +422,20 @@ def _run_tick(window, game: GolfGame, tracker: _BallTracker) -> None:
         cue_ball = game.get_cue_ball(balls)
         if cue_ball is not None and cue_ball.get('center_cm') is not None:
             cue_cm = cue_ball['center_cm']
-            target_ball = game.get_target_ball(balls)
-
-            if target_ball is not None and target_ball.get('center_cm') is not None:
-                cue_path, target_path = calculate_path(
-                    cue_cm,
-                    target_ball['center_cm'],
-                    window.selected_pocket_cm,
+            remaining_dicts = [
+                b for b in balls
+                if not b.get('is_cue')
+                and b.get('center_cm') is not None
+                and b.get('color') in game.remaining_balls
+            ]
+            if remaining_dicts:
+                best_ball, cue_path, target_path = suggest_best_shot(
+                    cue_cm, remaining_dicts, all_balls=balls
                 )
-            else:
-                remaining_dicts = [
-                    b for b in balls
-                    if not b.get('is_cue')
-                    and b.get('center_cm') is not None
-                    and b.get('color') in game.remaining_balls
-                ]
-                if remaining_dicts:
-                    best_ball, cue_path, target_path = suggest_best_shot(
-                        cue_cm, remaining_dicts, all_balls=balls
-                    )
-                    if best_ball is not None:
-                        game.select_target(best_ball['color'])
+                if best_ball is not None:
+                    game.select_target(best_ball['color'])
+                else:
+                    game.selected_target_color = None
 
     # 7. Render
     window.render(

@@ -57,10 +57,12 @@ POCKET_RADIUS_CM: float = 8.0   # a ball within this distance of a pocket is "po
 MOVEMENT_THRESHOLD_CM: float = 2.0
 
 # Number of consecutive frames all balls must be stationary to end IN_PROGRESS.
-STATIONARY_FRAMES_REQUIRED: int = 10
+# At ~30 fps (33 ms/tick), 60 frames ≈ 2 seconds of complete immobility.
+STATIONARY_FRAMES_REQUIRED: int = 60
 
 # ─── State constants ──────────────────────────────────────────────────────────
 
+STATE_SETUP       = 'SETUP'
 STATE_WAITING     = 'WAITING_FOR_SHOT'
 STATE_IN_PROGRESS = 'SHOT_IN_PROGRESS'
 STATE_RESOLVING   = 'RESOLVING'
@@ -90,22 +92,27 @@ class GolfGame:
             Must match the color strings returned by Ball_Detection
             ('orange', 'yellow', 'blue', 'bordeaux', …).
         """
-        self.state: str = STATE_WAITING
+        self.state: str = STATE_SETUP
         self.stroke_count: int = 0
         self.remaining_balls: List[str] = list(colored_ball_colors)
         self.pocketed_balls: List[str] = []
         self.selected_target_color: Optional[str] = None
-
-        # Positions at the moment a stroke was detected (color → cm).
         self._snapshot_before_shot: Dict[str, Tuple[float, float]] = {}
-
-        # Positions from the previous tick (color → cm), for motion detection.
         self._prev_positions: Dict[str, Tuple[float, float]] = {}
-
-        # Counter for consecutive stationary frames during IN_PROGRESS.
         self._stationary_frames: int = 0
 
     # ── Public methods ────────────────────────────────────────────────────────
+
+    def reset(self, colored_ball_colors: List[str]) -> None:
+        """Reset all game state for a new round."""
+        self.state = STATE_WAITING
+        self.stroke_count = 0
+        self.remaining_balls = list(colored_ball_colors)
+        self.pocketed_balls = []
+        self.selected_target_color = None
+        self._snapshot_before_shot = {}
+        self._prev_positions = {}
+        self._stationary_frames = 0
 
     def update(self, balls: List[Dict]) -> None:
         """
@@ -117,6 +124,9 @@ class GolfGame:
             Each dict must contain 'center_cm' (or None) and 'color'.
             The cue ball has 'is_cue': True.
         """
+        if self.state in (STATE_SETUP, STATE_GAME_OVER):
+            return
+
         current_positions = _extract_positions(balls)
 
         if self.state == STATE_WAITING:
@@ -127,8 +137,6 @@ class GolfGame:
 
         elif self.state == STATE_RESOLVING:
             self._handle_resolving(current_positions)
-
-        # STATE_GAME_OVER: no further transitions.
 
         self._prev_positions = current_positions
 
@@ -183,7 +191,7 @@ class GolfGame:
         if _any_ball_moved(self._prev_positions, current, MOVEMENT_THRESHOLD_CM):
             # Stroke detected: save snapshot, enter IN_PROGRESS.
             # Stroke count is NOT incremented here — only confirmed in RESOLVING.
-            self._snapshot_before_shot = dict(current)
+            self._snapshot_before_shot = dict(self._prev_positions)
             self._stationary_frames = 0
             self.state = STATE_IN_PROGRESS
 
@@ -209,17 +217,16 @@ class GolfGame:
         # Real shot confirmed: increment stroke.
         self.stroke_count += 1
 
-        # Identify pocketed balls: present in snapshot but missing now,
-        # and their snapshot position was within pocket radius.
-        for color, pos_cm in snapshot.items():
+        # Identify pocketed balls: any colored ball present in the pre-shot
+        # snapshot but missing from current detection was pocketed.
+        for color in list(snapshot.keys()):
             if color == 'white':
-                continue   # cue ball scratch is a separate rule (not implemented here)
+                continue
             if color in self.remaining_balls and color not in current:
-                if _near_any_pocket(pos_cm):
-                    self.pocketed_balls.append(color)
-                    self.remaining_balls.remove(color)
-                    if self.selected_target_color == color:
-                        self.selected_target_color = None
+                self.pocketed_balls.append(color)
+                self.remaining_balls.remove(color)
+                if self.selected_target_color == color:
+                    self.selected_target_color = None
 
         # Transition.
         if self.is_game_over():

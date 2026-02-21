@@ -163,16 +163,35 @@ QStatusBar { background-color: #16213e; color: #aaa; }
 # ═════════════════════════════════════════════════════════════════════════════
 
 class ClickableLabel(QLabel):
-    """QLabel that emits (x, y) in label pixel coords when left-clicked."""
+    """QLabel that emits (x, y) in label pixel coords on click, drag, and release."""
     clicked       = pyqtSignal(int, int)
     right_clicked = pyqtSignal(int, int)
+    dragged       = pyqtSignal(int, int)
+    released      = pyqtSignal(int, int)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._dragging = False
+        self.setMouseTracking(False)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
+            self._dragging = True
             self.clicked.emit(event.x(), event.y())
         elif event.button() == Qt.RightButton:
             self.right_clicked.emit(event.x(), event.y())
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging:
+            self.dragged.emit(event.x(), event.y())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._dragging:
+            self._dragging = False
+            self.released.emit(event.x(), event.y())
+        super().mouseReleaseEvent(event)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -371,6 +390,8 @@ class CalibrationPage(QWidget):
         self._cam_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._cam_label.setText('Starting camera…')
         self._cam_label.clicked.connect(self._on_label_click)
+        self._cam_label.dragged.connect(self._on_label_drag)
+        self._cam_label.released.connect(self._on_label_release)
         layout.addWidget(self._cam_label, stretch=1)
 
         self._lbl_corners = QLabel('Corners: 0 / 4')
@@ -380,6 +401,7 @@ class CalibrationPage(QWidget):
 
         btn_row = QHBoxLayout()
         self._btn_auto   = QPushButton('Auto-detect')
+        self._btn_clear  = QPushButton('Clear Corners')
         self._btn_accept = QPushButton('Accept')
         self._btn_last   = QPushButton('Use Last')
         self._btn_skip   = QPushButton('Skip')
@@ -389,11 +411,13 @@ class CalibrationPage(QWidget):
         self._btn_auto.setEnabled(SCENE_AVAILABLE)
 
         self._btn_auto.clicked.connect(self._on_auto_detect)
+        self._btn_clear.clicked.connect(self._on_clear)
         self._btn_accept.clicked.connect(self._on_accept)
         self._btn_last.clicked.connect(self._on_use_last)
         self._btn_skip.clicked.connect(self._on_skip)
 
         btn_row.addWidget(self._btn_auto)
+        btn_row.addWidget(self._btn_clear)
         btn_row.addWidget(self._btn_accept)
         btn_row.addWidget(self._btn_last)
         btn_row.addWidget(self._btn_skip)
@@ -404,7 +428,9 @@ class CalibrationPage(QWidget):
         self._corners  = []
         self._drag_idx = -1
         self._frame    = None
+        self.accepted_corners = None
         self._update_corner_label()
+        self._btn_last.setEnabled(os.path.exists(_CAM_CACHE))
 
         self._cap = cap
         if self._cap is None or not self._cap.isOpened():
@@ -471,7 +497,7 @@ class CalibrationPage(QWidget):
             return (fx, fy)
         return None
 
-    def _nearest_corner(self, fx: int, fy: int, threshold: int = 20) -> int:
+    def _nearest_corner(self, fx: int, fy: int, threshold: int = 30) -> int:
         for i, (cx, cy) in enumerate(self._corners):
             if (fx - cx) ** 2 + (fy - cy) ** 2 < threshold ** 2:
                 return i
@@ -483,6 +509,7 @@ class CalibrationPage(QWidget):
             return
         idx = self._nearest_corner(*pt)
         if idx >= 0:
+            self._drag_idx = idx
             self._corners[idx] = pt
         elif len(self._corners) < 4:
             self._corners.append(pt)
@@ -490,10 +517,37 @@ class CalibrationPage(QWidget):
         if self._frame is not None:
             self._show_frame(self._frame)
 
+    def _on_label_drag(self, lx: int, ly: int):
+        if self._drag_idx < 0 or self._drag_idx >= len(self._corners):
+            return
+        pt = self._label_to_frame(lx, ly)
+        if pt is None:
+            return
+        self._corners[self._drag_idx] = pt
+        if self._frame is not None:
+            self._show_frame(self._frame)
+
+    def _on_label_release(self, lx: int, ly: int):
+        if self._drag_idx >= 0:
+            pt = self._label_to_frame(lx, ly)
+            if pt is not None and self._drag_idx < len(self._corners):
+                self._corners[self._drag_idx] = pt
+            self._drag_idx = -1
+            self._update_corner_label()
+            if self._frame is not None:
+                self._show_frame(self._frame)
+
     def _update_corner_label(self):
         n = len(self._corners)
         self._lbl_corners.setText(f'Corners: {n} / 4')
         self._btn_accept.setEnabled(n == 4)
+
+    def _on_clear(self):
+        self._corners = []
+        self._drag_idx = -1
+        self._update_corner_label()
+        if self._frame is not None:
+            self._show_frame(self._frame)
 
     def _on_auto_detect(self):
         if self._frame is None or not SCENE_AVAILABLE:
@@ -987,7 +1041,10 @@ class BilliardsApp(QMainWindow):
         self.lbl_strokes   = self._make_status_label('Strokes: 0')
         self.lbl_remaining = self._make_status_label('Remaining: —')
         self.lbl_pocket    = self._make_status_label('Pocket: auto')
-        for lbl in (self.lbl_strokes, self.lbl_remaining, self.lbl_pocket):
+        self.lbl_game_msg  = QLabel('Press Start Game to begin')
+        self.lbl_game_msg.setStyleSheet('color: #e94560; font-size: 11px; font-weight: bold;')
+        self.lbl_game_msg.setWordWrap(True)
+        for lbl in (self.lbl_strokes, self.lbl_remaining, self.lbl_pocket, self.lbl_game_msg):
             sb.addWidget(lbl)
 
         sb.addWidget(self._make_divider())
@@ -1009,22 +1066,29 @@ class BilliardsApp(QMainWindow):
         ctrl_hdr.setStyleSheet('color: #888; font-size: 10px; letter-spacing: 1px;')
         sb.addWidget(ctrl_hdr)
 
-        self.btn_capture = QPushButton('Capture Frame')
-        self.btn_reset   = QPushButton('Reset Selection')
-        self.btn_mode    = QPushButton('Switch to Projection')
-        self.btn_recalib = QPushButton('Re-calibrate')
+        self.btn_start_game  = QPushButton('Start Game')
+        self.btn_start_over  = QPushButton('Start Over')
+        self.btn_capture     = QPushButton('Capture Frame')
+        self.btn_reset       = QPushButton('Reset Selection')
+        self.btn_mode        = QPushButton('Switch to Projection')
+        self.btn_recalib     = QPushButton('Re-calibrate')
 
+        self.btn_start_game.setToolTip('Validate 5 balls and start a new round')
+        self.btn_start_game.setStyleSheet('font-weight: bold;')
+        self.btn_start_over.setToolTip('Reset strokes and remaining balls to start a new round')
         self.btn_capture.setToolTip('Freeze / unfreeze camera feed (Space)')
         self.btn_reset.setToolTip('Clear pocket selection (R)')
         self.btn_mode.setToolTip('Toggle Screen / Projection (M)')
         self.btn_recalib.setToolTip('Go back to calibration page')
 
+        self.btn_start_game.clicked.connect(self._on_start_game)
+        self.btn_start_over.clicked.connect(self._on_start_over)
         self.btn_capture.clicked.connect(self._on_capture)
         self.btn_reset.clicked.connect(self._on_reset)
         self.btn_mode.clicked.connect(self._on_toggle_mode)
         self.btn_recalib.clicked.connect(self._on_recalibrate)
 
-        for btn in (self.btn_capture, self.btn_reset, self.btn_mode, self.btn_recalib):
+        for btn in (self.btn_start_game, self.btn_start_over, self.btn_capture, self.btn_reset, self.btn_mode, self.btn_recalib):
             sb.addWidget(btn)
 
         sb.addStretch()
@@ -1136,6 +1200,14 @@ class BilliardsApp(QMainWindow):
         self.proj_H_inv = None
         self.ref_path   = None
         self._table_corners = None
+
+        if self._cap is None or not self._cap.isOpened():
+            print('[GUI] Camera unavailable during recalibration — falling back to mock.')
+            self.use_mock = True
+            self._calib_page.accepted_corners = None
+            self._on_calibration_done(None)
+            return
+
         self._stack.setCurrentIndex(1)
         self.setMinimumSize(800, 520)
         self.statusBar().showMessage('Place 4 corners and click Accept.')
@@ -1565,6 +1637,57 @@ class BilliardsApp(QMainWindow):
     # Button callbacks
     # ─────────────────────────────────────────────────────────────────────────
 
+    def _on_start_game(self):
+        """Validate 5 balls detected, then reset and start a new game."""
+        game = getattr(self, 'game', None)
+        balls = getattr(self, '_last_balls', None)
+        if game is None:
+            self.lbl_game_msg.setText('Game not initialized yet.')
+            return
+        if not balls:
+            self.lbl_game_msg.setText('No balls detected. Place 5 balls on the table.')
+            return
+
+        n = len(balls)
+        if n != 5:
+            self.lbl_game_msg.setText(
+                f'Found {n} ball(s) — need exactly 5.\n'
+                'Place 1 white + 4 colored balls on the table.'
+            )
+            return
+
+        colored = [b['color'] for b in balls if not b.get('is_cue')]
+        if len(colored) != 4:
+            self.lbl_game_msg.setText(
+                f'Need 1 white + 4 colored balls (found {len(colored)} colored).'
+            )
+            return
+
+        game.reset(colored)
+        self.lbl_game_msg.setText('Game started!')
+        self.lbl_strokes.setText('Strokes: 0')
+        self.lbl_remaining.setText(f'Remaining: {len(colored)}')
+        self.statusBar().showMessage('Game started — make your first shot!')
+
+    def _on_start_over(self):
+        """Reset game back to SETUP state so the user can press Start Game again."""
+        game = getattr(self, 'game', None)
+        if game is None:
+            return
+        from golf_game import STATE_SETUP
+        game.state = STATE_SETUP
+        game.stroke_count = 0
+        game.remaining_balls = []
+        game.pocketed_balls = []
+        game.selected_target_color = None
+        game._snapshot_before_shot = {}
+        game._prev_positions = {}
+        game._stationary_frames = 0
+        self.lbl_game_msg.setText('Game reset. Place 5 balls and press Start Game.')
+        self.lbl_strokes.setText('Strokes: 0')
+        self.lbl_remaining.setText('Remaining: —')
+        self.statusBar().showMessage('Game reset — place 5 balls on the table.')
+
     def _on_capture(self):
         self.paused = not self.paused
         if self.paused:
@@ -1631,6 +1754,12 @@ class BilliardsApp(QMainWindow):
         self.lbl_tracker.setText(
             f'Tracker: {self._last_tracker_state.title()}'
         )
+        if self._last_game_state == 'GAME_OVER':
+            self.lbl_game_msg.setText(
+                f'Game Over! All balls pocketed in {self._last_stroke_count} strokes.'
+            )
+        elif self._last_game_state == 'SETUP':
+            self.lbl_game_msg.setText('Press Start Game to begin')
 
     # ─────────────────────────────────────────────────────────────────────────
     # Keyboard shortcuts
