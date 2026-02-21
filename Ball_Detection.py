@@ -45,10 +45,10 @@ class BallDetectionConfig:
         hough_dp: float = 1.2,
         hough_param1: float = 120.0,
         hough_param2: float = 14.0,
-        min_circularity: float = 0.6,
+        min_circularity: float = 0.45,
         min_area_px: int = 60,
-        non_green_ratio: float = 0.3,
-        edge_margin: float = 0.05,
+        diff_ratio: float = 0.3,
+        edge_margin: float = 0,
         hue_similarity_thresh: float = 10.0,
         # Color classification thresholds (HSV
         yellow_hue: Tuple[int, int] = (10, 20),
@@ -82,7 +82,7 @@ class BallDetectionConfig:
         self.min_circularity = min_circularity
         self.min_area_px = min_area_px
         # Non-green coverage threshold for circle filtering
-        self.non_green_ratio = non_green_ratio
+        self.diff_ratio = diff_ratio
         # Edge filter margin in normalized table coordinates
         self.edge_margin = edge_margin
         # If bbox mean hue is within this threshold of table hue, drop it
@@ -437,8 +437,8 @@ def detect_balls(
     if circles is not None:
         circles = np.squeeze(circles, axis=0)
         for x, y, r in circles:
-            if _circle_diff_ratio(diff_mask, (x, y), r) < cfg.non_green_ratio:
-                continue#ignore green circles which are likely to be the noise, not balls.
+            if _circle_diff_ratio(diff_mask, (x, y), r) < cfg.diff_ratio:
+                continue
             x0 = int(round(x - r))
             y0 = int(round(y - r))
             w = int(round(2 * r))
@@ -556,7 +556,7 @@ def draw_detections(
 
 if __name__ == "__main__":
     ref_path="ref.jpeg"
-    img_path="img_1.jpeg"
+    img_path="img_5.jpeg"
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
