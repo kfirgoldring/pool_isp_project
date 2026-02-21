@@ -331,6 +331,28 @@ class _BallTracker:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Font loading
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _load_opticue_fonts(app) -> None:
+    """Load OptiCue custom fonts and set the application default font."""
+    import os
+    from PyQt5.QtGui import QFontDatabase, QFont
+    font_dir = os.path.join(os.path.dirname(__file__), 'assets', 'fonts')
+    for fname in [
+        'PlayfairDisplay-Bold.ttf', 'PlayfairDisplay-Black.ttf',
+        'PlayfairDisplay-Italic.ttf', 'Lora-Regular.ttf', 'Lora-Italic.ttf',
+        'DMSans-Regular.ttf', 'DMSans-Medium.ttf',
+    ]:
+        path = os.path.join(font_dir, fname)
+        if os.path.exists(path):
+            QFontDatabase.addApplicationFont(path)
+        else:
+            print(f'[fonts] WARNING: {fname} not found at {path}')
+    app.setFont(QFont('DM Sans', 10))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -362,6 +384,8 @@ def main() -> None:
     window.game = game
     window._last_balls = []
     _ctx['window'] = window
+
+    _load_opticue_fonts(app_qt)
     window.show()
 
     sys.exit(app_qt.exec_())

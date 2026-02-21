@@ -48,10 +48,11 @@ except (ImportError, AttributeError):
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
     QVBoxLayout, QHBoxLayout, QFrame, QSizePolicy, QStatusBar,
-    QStackedWidget, QCheckBox, QSpinBox, QGroupBox,
+    QStackedWidget, QCheckBox, QSpinBox, QGroupBox, QLineEdit,
+    QProgressBar,
 )
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QImage, QPixmap, QFont
+from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
+from PyQt5.QtGui import QImage, QPixmap, QFont, QIcon
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Cache paths  (user home — invisible to the user)
@@ -89,11 +90,25 @@ BALL_COLORS_BGR: Dict[str, Tuple[int, int, int]] = {
     'unknown':  (100, 100, 100),
 }
 
-COLOR_TRAJECTORY  = (0, 255, 150)   # bright green-cyan  — cue ball path
-COLOR_TARGET_PATH = (0, 165, 255)   # orange             — target ball → pocket
-COLOR_SELECTION   = (0, 255, 255)   # cyan selection ring
-COLOR_POCKET      = (200, 200, 200) # light grey pocket marker
-COLOR_POCKET_SEL  = (0, 220, 255)   # highlighted selected pocket
+COLOR_PATH       = ( 26,  95, 217)   # Orange  #d95f1a BGR — primary trajectory
+COLOR_PATH_2     = ( 16, 138, 192)   # Mustard #c08a10 BGR — secondary trajectory
+COLOR_SELECTION  = ( 26,  95, 217)   # Orange ring on selected ball
+COLOR_POCKET     = ( 96, 128,  90)   # Sage    #5a8060 BGR
+COLOR_POCKET_SEL = ( 38,  58,  28)   # Forest  #1c3a26 BGR
+
+# Ball color name → hex string (for Qt rich-text labels)
+_BALL_HEX: Dict[str, str] = {
+    'white':    '#f0f0f0',
+    'yellow':   '#ffe100',
+    'blue':     '#0064d2',
+    'red':      '#d20000',
+    'bordeaux': '#7a001a',
+    'orange':   '#ff6a00',
+    'green':    '#00a032',
+    'purple':   '#7a0078',
+    'gray':     '#888888',
+    'unknown':  '#888888',
+}
 
 POCKET_CLICK_RADIUS = 30  # px tolerance for clicking a pocket marker
 
@@ -114,47 +129,119 @@ _POCKET_FRACTIONS = [
     (0.03, 0.96), (0.50, 0.98), (0.97, 0.96),
 ]
 
-# ── Shared dark-theme stylesheet ──────────────────────────────────────────────
+# ── OptiCue brand stylesheet ───────────────────────────────────────────────────
 _APP_STYLE = """
 QMainWindow, QWidget {
-    background-color: #1a1a2e;
-    color: #e0e0e0;
-    font-family: 'Segoe UI', Arial, sans-serif;
+    background-color: #f4efe4;
+    color: #2a2520;
+    font-family: 'DM Sans', 'Segoe UI', sans-serif;
 }
-QLabel { color: #e0e0e0; }
-QPushButton {
-    background-color: #16213e;
-    color: #e0e0e0;
-    border: 1px solid #0f3460;
-    border-radius: 6px;
-    padding: 8px 12px;
+
+QLabel {
+    color: #2a2520;
+    font-family: 'DM Sans', 'Segoe UI', sans-serif;
     font-size: 13px;
-    min-height: 32px;
 }
-QPushButton:hover  { background-color: #0f3460; border-color: #e94560; }
-QPushButton:pressed{ background-color: #e94560; }
-QPushButton:disabled { background-color: #111; color: #555; border-color: #333; }
-QPushButton#btn_mode_active { background-color: #e94560; border-color: #e94560; color: #fff; }
+
+QPushButton {
+    background-color: #1c3a26;
+    color: #f4efe4;
+    border: none;
+    border-radius: 2px;
+    padding: 9px 14px;
+    font-size: 14px;
+    font-family: 'DM Sans', 'Segoe UI', sans-serif;
+    min-height: 36px;
+    text-align: left;
+}
+QPushButton:hover    { background-color: #2a5c38; }
+QPushButton:pressed  { background-color: #d95f1a; }
+QPushButton:disabled {
+    background-color: #ece6d8;
+    color: #b0a48c;
+    border: 1px solid #ddd4bc;
+}
+
+QPushButton#btn_accent {
+    background-color: #d95f1a;
+    color: #f4efe4;
+}
+QPushButton#btn_accent:hover   { background-color: #c04a10; }
+QPushButton#btn_accent:pressed { background-color: #a03a08; }
+
+QPushButton#btn_ghost {
+    background-color: transparent;
+    color: #2a2520;
+    border: 1px solid #c4b898;
+}
+QPushButton#btn_ghost:hover  { border-color: #1c3a26; color: #1c3a26; }
+
+QPushButton#btn_mode_active {
+    background-color: #d95f1a;
+    color: #f4efe4;
+    border: none;
+}
+
 QGroupBox {
-    border: 1px solid #0f3460;
-    border-radius: 6px;
-    margin-top: 10px;
-    padding: 8px;
-    font-size: 12px;
-    color: #aaa;
+    background-color: transparent;
+    border: 1px solid #c4b898;
+    border-radius: 2px;
+    margin-top: 12px;
+    padding: 10px 8px 8px 8px;
+    font-size: 9px;
+    letter-spacing: 2px;
+    color: #8a7d68;
+    font-family: 'DM Sans', 'Segoe UI', sans-serif;
 }
-QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; }
-QCheckBox { color: #e0e0e0; font-size: 13px; }
-QCheckBox::indicator { width: 16px; height: 16px; }
+QGroupBox::title {
+    subcontrol-origin: margin;
+    left: 10px;
+    padding: 0 6px;
+    background-color: transparent;
+    text-transform: uppercase;
+}
+
+QCheckBox {
+    color: #2a2520;
+    font-size: 13px;
+    font-family: 'DM Sans', 'Segoe UI', sans-serif;
+    spacing: 8px;
+}
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border: 1px solid #c4b898;
+    border-radius: 2px;
+    background-color: #f9f6f0;
+}
+QCheckBox::indicator:checked {
+    background-color: #1c3a26;
+    border-color: #1c3a26;
+}
+
 QSpinBox {
-    background-color: #16213e;
-    color: #e0e0e0;
-    border: 1px solid #0f3460;
-    border-radius: 4px;
-    padding: 2px 6px;
+    background-color: #f9f6f0;
+    color: #2a2520;
+    border: 1px solid #c4b898;
+    border-radius: 2px;
+    padding: 4px 8px;
+    font-family: 'DM Sans', 'Segoe UI', sans-serif;
 }
-QFrame#divider { color: #0f3460; }
-QStatusBar { background-color: #16213e; color: #aaa; }
+QSpinBox:focus { border-color: #1c3a26; }
+
+QFrame#divider {
+    color: #c4b898;
+    background-color: #c4b898;
+    max-height: 1px;
+}
+
+QStatusBar {
+    background-color: #ece6d8;
+    color: #8a7d68;
+    font-size: 10px;
+    font-family: 'DM Sans', 'Segoe UI', sans-serif;
+    border-top: 1px solid #c4b898;
+}
 """
 
 
@@ -204,7 +291,7 @@ class ProjectorWindow(QWidget):
     def __init__(self, close_callback=None):
         super().__init__()
         self._close_callback = close_callback
-        self.setWindowTitle('Billiards - Projector Output  [Esc = back to Screen]')
+        self.setWindowTitle('OptiCue — Projector Output  [Esc = back]')
         self.setStyleSheet('background-color: black;')
         self._label = QLabel(self)
         self._label.setAlignment(Qt.AlignCenter)
@@ -267,18 +354,39 @@ class SetupPage(QWidget):
         outer.setContentsMargins(40, 40, 40, 40)
         outer.setSpacing(20)
 
-        title = QLabel('Billiards Assistance System')
+        # Logo area — silently skipped if file missing
+        import os as _os
+        _logo_path = _os.path.join(_os.path.dirname(__file__), 'assets', 'opticue_logo.png')
+        if _os.path.exists(_logo_path):
+            from PyQt5.QtGui import QPixmap as _QPixmap
+            logo_lbl = QLabel()
+            logo_lbl.setAlignment(Qt.AlignCenter)
+            logo_lbl.setMaximumHeight(130)
+            pix = _QPixmap(_logo_path)
+            logo_lbl.setPixmap(pix.scaledToHeight(110, Qt.SmoothTransformation))
+            outer.addWidget(logo_lbl)
+
+        title = QLabel()
+        title.setTextFormat(Qt.RichText)
+        title.setText(
+            '<span style="font-family:\'Playfair Display\',Georgia,serif;'
+            ' font-weight:900; font-size:32px; color:#1c3a26;">Opti</span>'
+            '<span style="font-family:\'Playfair Display\',Georgia,serif;'
+            ' font-weight:700; font-style:italic; font-size:32px; color:#d95f1a;">Cue</span>'
+        )
         title.setAlignment(Qt.AlignCenter)
-        f = QFont()
-        f.setPointSize(16)
-        f.setBold(True)
-        title.setFont(f)
-        title.setStyleSheet('color: #e94560; padding: 8px 0;')
+        title.setStyleSheet('padding: 8px 0 2px 0;')
         outer.addWidget(title)
 
-        sub = QLabel('Configure your hardware below, then click Start.')
+        sub = QLabel('Configure your hardware to begin.')
         sub.setAlignment(Qt.AlignCenter)
-        sub.setStyleSheet('color: #888; font-size: 12px;')
+        sub.setStyleSheet("""
+            font-family: 'Lora', 'Georgia', serif;
+            font-size: 13px;
+            font-style: italic;
+            color: #8a7d68;
+            padding-bottom: 8px;
+        """)
         outer.addWidget(sub)
 
         cam_group = QGroupBox('Camera')
@@ -311,18 +419,30 @@ class SetupPage(QWidget):
 
         self._lbl_mock = QLabel('(No hardware selected — will run in mock/demo mode)')
         self._lbl_mock.setAlignment(Qt.AlignCenter)
-        self._lbl_mock.setStyleSheet('color: #888; font-size: 11px;')
+        self._lbl_mock.setStyleSheet("""
+            color: #8a7d68;
+            font-family: 'Lora', Georgia, serif;
+            font-style: italic;
+            font-size: 11px;
+        """)
         self._lbl_mock.setVisible(False)
         outer.addWidget(self._lbl_mock)
 
         outer.addStretch()
 
-        self._btn_start = QPushButton('Start Pipeline')
-        self._btn_start.setMinimumHeight(44)
-        f2 = QFont()
-        f2.setPointSize(13)
-        f2.setBold(True)
-        self._btn_start.setFont(f2)
+        self._btn_start = QPushButton('Start  →')
+        self._btn_start.setMinimumHeight(46)
+        self._btn_start.setStyleSheet("""
+            background-color: #1c3a26;
+            color: #f4efe4;
+            border: none;
+            border-radius: 2px;
+            font-family: 'DM Sans', 'Segoe UI', sans-serif;
+            font-size: 15px;
+            font-weight: 500;
+            padding: 12px;
+            text-align: center;
+        """)
         self._btn_start.clicked.connect(self._on_start)
         outer.addWidget(self._btn_start)
 
@@ -363,65 +483,152 @@ class CalibrationPage(QWidget):
         self.accepted_corners: Optional[np.ndarray] = None
         self._build()
 
+    _CORNER_NAMES = ['Top-Left', 'Top-Right', 'Bottom-Right', 'Bottom-Left']
+
     def _build(self):
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        header = QLabel('Camera Calibration — Click to place 4 table corners')
-        header.setAlignment(Qt.AlignCenter)
-        header.setStyleSheet('color: #e94560; font-size: 13px; font-weight: bold;')
-        layout.addWidget(header)
-
-        self._instructions = QLabel(
-            'Click on the 4 table corners in order:\n'
-            '  1 Top-Left   2 Top-Right   3 Bottom-Right   4 Bottom-Left\n'
-            'You can drag existing points to adjust them.'
-        )
-        self._instructions.setAlignment(Qt.AlignCenter)
-        self._instructions.setStyleSheet('color: #888; font-size: 11px;')
-        layout.addWidget(self._instructions)
-
+        # ── Left: camera area (stack: live feed | loading overlay) ────────────
         self._cam_label = ClickableLabel()
         self._cam_label.setAlignment(Qt.AlignCenter)
         self._cam_label.setStyleSheet(
-            'background-color: #0a0a1a; border: 2px solid #0f3460; border-radius: 4px;'
+            'background-color: #1a1a1a; border: 1px solid #c4b898;'
         )
         self._cam_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._cam_label.setText('Starting camera…')
         self._cam_label.clicked.connect(self._on_label_click)
         self._cam_label.dragged.connect(self._on_label_drag)
         self._cam_label.released.connect(self._on_label_release)
-        layout.addWidget(self._cam_label, stretch=1)
 
-        self._lbl_corners = QLabel('Corners: 0 / 4')
-        self._lbl_corners.setAlignment(Qt.AlignCenter)
-        self._lbl_corners.setStyleSheet('font-size: 12px; color: #aaa;')
-        layout.addWidget(self._lbl_corners)
+        # Loading overlay (shown while camera is opening)
+        loading_w = QWidget()
+        loading_w.setStyleSheet('background-color: #1a1a1a;')
+        lw = QVBoxLayout(loading_w)
+        lw.setAlignment(Qt.AlignCenter)
+        lw.setSpacing(16)
 
-        btn_row = QHBoxLayout()
+        load_title = QLabel('Opening Camera')
+        load_title.setAlignment(Qt.AlignCenter)
+        load_title.setStyleSheet(
+            "font-family: 'Playfair Display', Georgia, serif;"
+            " font-size: 24px; font-weight: bold; color: #f4efe4;"
+        )
+        lw.addWidget(load_title)
+
+        load_sub = QLabel('Please wait\u2026')
+        load_sub.setAlignment(Qt.AlignCenter)
+        load_sub.setStyleSheet(
+            "font-family: 'Lora', Georgia, serif;"
+            " font-style: italic; font-size: 14px; color: #8a7d68;"
+        )
+        lw.addWidget(load_sub)
+
+        self._loading_bar = QProgressBar()
+        self._loading_bar.setRange(0, 0)       # indeterminate / marquee
+        self._loading_bar.setFixedHeight(10)
+        self._loading_bar.setFixedWidth(280)
+        self._loading_bar.setTextVisible(False)
+        self._loading_bar.setStyleSheet("""
+            QProgressBar {
+                background-color: #2e2e2e;
+                border: none;
+                border-radius: 5px;
+            }
+            QProgressBar::chunk {
+                background-color: #1c3a26;
+                border-radius: 5px;
+            }
+        """)
+        lw.addWidget(self._loading_bar, alignment=Qt.AlignCenter)
+
+        # Stack: page 0 = live cam, page 1 = loading overlay
+        self._cam_stack = QStackedWidget()
+        self._cam_stack.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self._cam_stack.addWidget(self._cam_label)   # index 0
+        self._cam_stack.addWidget(loading_w)          # index 1
+        root.addWidget(self._cam_stack, stretch=1)
+
+        # ── Right: sidebar ────────────────────────────────────────────────────
+        sidebar = QWidget()
+        sidebar.setFixedWidth(260)
+        sidebar.setStyleSheet('background-color: #ece6d8;')
+        sb = QVBoxLayout(sidebar)
+        sb.setContentsMargins(16, 16, 16, 16)
+        sb.setSpacing(10)
+
+        title_lbl = QLabel('Calibration')
+        title_lbl.setStyleSheet("""
+            font-family: 'Playfair Display', Georgia, serif;
+            font-size: 22px;
+            font-weight: bold;
+            color: #1c3a26;
+        """)
+        sb.addWidget(title_lbl)
+
+        sub_lbl = QLabel('Click all 4 table corners')
+        sub_lbl.setStyleSheet("""
+            font-family: 'Lora', Georgia, serif;
+            font-style: italic;
+            font-size: 12px;
+            color: #8a7d68;
+        """)
+        sb.addWidget(sub_lbl)
+
+        divider = QFrame()
+        divider.setFrameShape(QFrame.HLine)
+        divider.setStyleSheet('background-color: #c4b898; max-height: 1px; border: none;')
+        sb.addWidget(divider)
+
+        # 4 corner rows (dynamic rich-text labels)
+        self._corner_rows = []
+        for i in range(4):
+            row_lbl = QLabel()
+            row_lbl.setTextFormat(Qt.RichText)
+            row_lbl.setMinimumHeight(28)
+            row_lbl.setStyleSheet('padding: 2px 0;')
+            self._corner_rows.append(row_lbl)
+            sb.addWidget(row_lbl)
+
+        # Status badge
+        self._lbl_corner_status = QLabel('0 of 4 corners placed')
+        self._lbl_corner_status.setWordWrap(True)
+        self._lbl_corner_status.setStyleSheet("""
+            background-color: #fdf6e3;
+            border: 1px solid #d4b896;
+            border-radius: 2px;
+            padding: 6px 10px;
+            font-family: 'Lora', Georgia, serif;
+            font-style: italic;
+            font-size: 12px;
+            color: #8a7d68;
+        """)
+        sb.addWidget(self._lbl_corner_status)
+
+        # Keep a hidden legacy label so _update_corner_label can still be called
+        self._lbl_corners = QLabel()
+        self._lbl_corners.setVisible(False)
+
+        sb.addStretch()
+
         self._btn_auto   = QPushButton('Auto-detect')
         self._btn_clear  = QPushButton('Clear Corners')
-        self._btn_accept = QPushButton('Accept')
-        self._btn_last   = QPushButton('Use Last')
-        self._btn_skip   = QPushButton('Skip')
+        self._btn_accept = QPushButton('Confirm Calibration')
 
         self._btn_accept.setEnabled(False)
-        self._btn_last.setEnabled(os.path.exists(_CAM_CACHE))
+        self._btn_accept.setObjectName('btn_accent')
+        self._btn_clear.setObjectName('btn_ghost')
         self._btn_auto.setEnabled(SCENE_AVAILABLE)
 
         self._btn_auto.clicked.connect(self._on_auto_detect)
         self._btn_clear.clicked.connect(self._on_clear)
         self._btn_accept.clicked.connect(self._on_accept)
-        self._btn_last.clicked.connect(self._on_use_last)
-        self._btn_skip.clicked.connect(self._on_skip)
 
-        btn_row.addWidget(self._btn_auto)
-        btn_row.addWidget(self._btn_clear)
-        btn_row.addWidget(self._btn_accept)
-        btn_row.addWidget(self._btn_last)
-        btn_row.addWidget(self._btn_skip)
-        layout.addLayout(btn_row)
+        for btn in (self._btn_auto, self._btn_clear, self._btn_accept):
+            sb.addWidget(btn)
+
+        root.addWidget(sidebar)
 
     def start_camera(self, cap):
         """Begin live preview using a shared cv2.VideoCapture."""
@@ -430,7 +637,6 @@ class CalibrationPage(QWidget):
         self._frame    = None
         self.accepted_corners = None
         self._update_corner_label()
-        self._btn_last.setEnabled(os.path.exists(_CAM_CACHE))
 
         self._cap = cap
         if self._cap is None or not self._cap.isOpened():
@@ -539,7 +745,21 @@ class CalibrationPage(QWidget):
 
     def _update_corner_label(self):
         n = len(self._corners)
-        self._lbl_corners.setText(f'Corners: {n} / 4')
+        for i, row_lbl in enumerate(self._corner_rows):
+            if i < n:
+                row_lbl.setText(
+                    '<span style="color:#d95f1a; font-size:15px; font-weight:bold;">✓</span>'
+                    f'&nbsp;&nbsp;<span style="color:#2a2520; font-size:13px;">'
+                    f'Corner {i + 1} set</span>'
+                )
+            else:
+                name = self._CORNER_NAMES[i]
+                row_lbl.setText(
+                    f'<span style="color:#c4b898; font-size:13px;">{i + 1}</span>'
+                    f'&nbsp;&nbsp;<span style="color:#c4b898; font-size:13px;">'
+                    f'{name}…</span>'
+                )
+        self._lbl_corner_status.setText(f'{n} of 4 corners placed')
         self._btn_accept.setEnabled(n == 4)
 
     def _on_clear(self):
@@ -595,6 +815,15 @@ class CalibrationPage(QWidget):
     def _on_skip(self):
         self.accepted_corners = None
         self._finish(None)
+
+    def start_loading_animation(self):
+        """Show the progress-bar loading overlay while the camera opens."""
+        self._cam_stack.setCurrentIndex(1)   # loading overlay
+
+    def stop_loading_animation(self):
+        """Return to the camera feed view."""
+        self._cam_stack.setCurrentIndex(0)   # live cam label
+        self._cam_label.setText('')
 
     def _finish(self, H):
         self._stop_camera()
@@ -722,6 +951,271 @@ class ReferencePage(QWidget):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# PlayerRegistrationPage — arcade-style player name entry (page 1)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class PlayerRegistrationPage(QWidget):
+    """
+    Shown before each game round.  One player enters their name and clicks
+    Continue.  Emits registration_done(name: str).
+    """
+    registration_done = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._build()
+
+    def _build(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(60, 40, 60, 40)
+        outer.setSpacing(16)
+
+        # Logo area — silently skipped if file missing
+        import os as _os
+        _logo_path = _os.path.join(_os.path.dirname(__file__), 'assets', 'opticue_logo.png')
+        if _os.path.exists(_logo_path):
+            from PyQt5.QtGui import QPixmap as _QPixmap
+            logo_lbl = QLabel()
+            logo_lbl.setAlignment(Qt.AlignCenter)
+            logo_lbl.setMaximumHeight(130)
+            pix = _QPixmap(_logo_path)
+            logo_lbl.setPixmap(pix.scaledToHeight(110, Qt.SmoothTransformation))
+            outer.addWidget(logo_lbl)
+
+        title = QLabel('Player Registration')
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("""
+            font-family: 'Playfair Display', Georgia, serif;
+            font-size: 28px;
+            font-weight: bold;
+            color: #1c3a26;
+            padding: 8px 0 2px 0;
+        """)
+        outer.addWidget(title)
+
+        sub = QLabel('Enter your name to play.')
+        sub.setAlignment(Qt.AlignCenter)
+        sub.setStyleSheet("""
+            font-family: 'Lora', 'Georgia', serif;
+            font-size: 13px;
+            font-style: italic;
+            color: #8a7d68;
+            padding-bottom: 12px;
+        """)
+        outer.addWidget(sub)
+
+        self._edit = QLineEdit()
+        self._edit.setPlaceholderText('Your name…')
+        self._edit.setMinimumHeight(40)
+        self._edit.setStyleSheet("""
+            background-color: #f9f6f0;
+            color: #2a2520;
+            border: 1px solid #c4b898;
+            border-radius: 2px;
+            padding: 8px 12px;
+            font-size: 14px;
+            font-family: 'DM Sans', 'Segoe UI', sans-serif;
+        """)
+        self._edit.returnPressed.connect(self._on_continue)
+        outer.addWidget(self._edit)
+
+        self._lbl_error = QLabel('')
+        self._lbl_error.setAlignment(Qt.AlignCenter)
+        self._lbl_error.setStyleSheet('color: #d95f1a; font-size: 12px;')
+        self._lbl_error.setVisible(False)
+        outer.addWidget(self._lbl_error)
+
+        outer.addStretch()
+
+        btn = QPushButton('Continue  →')
+        btn.setMinimumHeight(46)
+        btn.setStyleSheet("""
+            background-color: #1c3a26;
+            color: #f4efe4;
+            border: none;
+            border-radius: 2px;
+            font-family: 'DM Sans', 'Segoe UI', sans-serif;
+            font-size: 15px;
+            font-weight: 500;
+            padding: 12px;
+            text-align: center;
+        """)
+        btn.clicked.connect(self._on_continue)
+        outer.addWidget(btn)
+
+    def showEvent(self, event):
+        """Clear the name field whenever the page is shown."""
+        super().showEvent(event)
+        self._edit.clear()
+        self._lbl_error.setVisible(False)
+        self._edit.setFocus()
+
+    def _on_continue(self):
+        name = self._edit.text().strip()
+        if not name:
+            self._lbl_error.setText('Please enter your name.')
+            self._lbl_error.setVisible(True)
+            return
+        self._lbl_error.setVisible(False)
+        self.registration_done.emit(name)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LeaderboardPage — session high-score board (page 4)
+# ═════════════════════════════════════════════════════════════════════════════
+
+class LeaderboardPage(QWidget):
+    """
+    Shown after each game round.
+    Displays all scores recorded in the current session, ranked by strokes.
+    Emits play_again, recalibrate_requested, or quit_requested.
+    """
+    play_again           = pyqtSignal()
+    recalibrate_requested = pyqtSignal()
+    quit_requested       = pyqtSignal()
+
+    def __init__(self):
+        super().__init__()
+        self._build()
+
+    def _build(self):
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(60, 40, 60, 40)
+        outer.setSpacing(20)
+
+        title = QLabel('High Scores')
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("""
+            font-family: 'Playfair Display', Georgia, serif;
+            font-size: 32px;
+            font-weight: bold;
+            color: #1c3a26;
+            padding: 8px 0 2px 0;
+        """)
+        outer.addWidget(title)
+
+        sub = QLabel('Fewer strokes wins.')
+        sub.setAlignment(Qt.AlignCenter)
+        sub.setStyleSheet("""
+            font-family: 'Lora', 'Georgia', serif;
+            font-size: 13px;
+            font-style: italic;
+            color: #8a7d68;
+            padding-bottom: 12px;
+        """)
+        outer.addWidget(sub)
+
+        # Dynamic score rows are placed inside this container
+        self._scores_container = QWidget()
+        self._scores_layout = QVBoxLayout(self._scores_container)
+        self._scores_layout.setSpacing(6)
+        self._scores_layout.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(self._scores_container)
+
+        outer.addStretch()
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
+
+        btn_play = QPushButton('Play Again')
+        btn_play.setObjectName('btn_accent')
+        btn_play.setMinimumHeight(42)
+        btn_play.clicked.connect(self.play_again.emit)
+
+        btn_recalib = QPushButton('Re-calibrate')
+        btn_recalib.setMinimumHeight(42)
+        btn_recalib.clicked.connect(self.recalibrate_requested.emit)
+
+        btn_quit = QPushButton('Quit')
+        btn_quit.setObjectName('btn_ghost')
+        btn_quit.setMinimumHeight(42)
+        btn_quit.clicked.connect(self.quit_requested.emit)
+
+        btn_row.addWidget(btn_play)
+        btn_row.addWidget(btn_recalib)
+        btn_row.addWidget(btn_quit)
+        outer.addLayout(btn_row)
+
+    def update_scores(self, rankings):
+        """
+        Populate the score table.
+        rankings: List[Tuple[str, int]] sorted ascending by strokes.
+        """
+        # Clear existing rows
+        while self._scores_layout.count():
+            item = self._scores_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+        if not rankings:
+            no_scores = QLabel('No scores yet.')
+            no_scores.setAlignment(Qt.AlignCenter)
+            no_scores.setStyleSheet('color: #8a7d68; font-size: 13px;')
+            self._scores_layout.addWidget(no_scores)
+            return
+
+        for rank, (name, strokes) in enumerate(rankings, 1):
+            row = QWidget()
+            row.setStyleSheet("""
+                background-color: %s;
+                border: 1px solid #c4b898;
+                border-radius: 2px;
+            """ % ('#f9f6f0' if rank == 1 else '#f4efe4'))
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(12, 8, 12, 8)
+
+            rank_lbl = QLabel(f'#{rank}')
+            rank_lbl.setStyleSheet("""
+                font-family: 'Playfair Display', Georgia, serif;
+                font-size: 16px;
+                font-weight: bold;
+                color: %s;
+                min-width: 40px;
+            """ % ('#d95f1a' if rank == 1 else '#1c3a26'))
+
+            name_lbl = QLabel(name)
+            name_lbl.setStyleSheet(
+                "font-family: 'DM Sans', 'Segoe UI', sans-serif;"
+                " font-size: 14px; color: #2a2520;"
+            )
+
+            score_lbl = QLabel(f'{strokes} strokes')
+            score_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            score_lbl.setStyleSheet(
+                "font-family: 'DM Sans', 'Segoe UI', sans-serif;"
+                " font-size: 14px; color: #8a7d68;"
+            )
+
+            row_layout.addWidget(rank_lbl)
+            row_layout.addWidget(name_lbl, stretch=1)
+            row_layout.addWidget(score_lbl)
+            self._scores_layout.addWidget(row)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# CameraOpenThread — opens cv2.VideoCapture without blocking the UI thread
+# ═════════════════════════════════════════════════════════════════════════════
+
+class CameraOpenThread(QThread):
+    """Opens cv2.VideoCapture in a background thread to avoid freezing the UI."""
+    opened = pyqtSignal(object)   # emits cv2.VideoCapture or None
+
+    def __init__(self, camera_index: int):
+        super().__init__()
+        self._index = camera_index
+
+    def run(self):
+        cap = cv2.VideoCapture(self._index)
+        if cap.isOpened():
+            for _ in range(5):    # warm-up reads so auto-exposure settles
+                cap.read()
+            self.opened.emit(cap)
+        else:
+            cap.release()
+            self.opened.emit(None)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 # BilliardsApp — main PyQt5 application window
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -729,11 +1223,12 @@ class BilliardsApp(QMainWindow):
     """
     Main application window.
 
-    Four-page flow:
-      0 → SetupPage       (hardware selection)
-      1 → CalibrationPage (camera calibration)
-      2 → ReferencePage   (capture empty-table reference image)
-      3 → Main view       (camera feed + overlays)
+    Five-page flow:
+      0 → SetupPage              (hardware selection)
+      1 → PlayerRegistrationPage (arcade-style name entry)
+      2 → CalibrationPage        (camera calibration; auto-captures reference frame)
+      3 → Main view              (camera feed + overlays)
+      4 → LeaderboardPage        (session high-score board)
 
     Integration with main.py:
       Pass tick_callback to __init__. It is called every 33 ms by the QTimer.
@@ -762,7 +1257,7 @@ class BilliardsApp(QMainWindow):
         # ── Table corners (camera px; stored during calibration) ─────────────
         self._table_corners: Optional[np.ndarray] = None   # shape (4, 2) float32
 
-        # ── Reference image path (set by ReferencePage) ──────────────────────
+        # ── Reference image path (auto-captured from calibration frame) ───────
         self.ref_path: Optional[str] = None
 
         # ── Pending user clicks (table cm coordinates, drained by main.py) ───
@@ -787,6 +1282,11 @@ class BilliardsApp(QMainWindow):
         self._last_game_state   : str       = 'WAITING_FOR_SHOT'
         self._last_selected_color: Optional[str] = None
         self._last_tracker_state : str       = 'TRACKING'
+        self._last_cue_present  : bool      = True   # False when cue ball leaves table
+
+        # ── Player / leaderboard state ───────────────────────────────────────
+        self._current_player_name: str  = ''
+        self.player_scores       : list = []   # [(name, strokes), …] session accumulates
 
         # ── Build UI ─────────────────────────────────────────────────────────
         self._build_ui()
@@ -856,6 +1356,10 @@ class BilliardsApp(QMainWindow):
         self._last_game_state    = game_state
         self._last_selected_color = selected_color
         self._last_tracker_state = tracker_state
+        # Track cue ball and cache raw ball list (used by _on_start_game)
+        self._last_balls = balls
+        if balls:
+            self._last_cue_present = any(b.get('is_cue') for b in balls)
 
         # ── Produce display-space (pixel) canvas ──────────────────────────────
         if top_down:
@@ -894,17 +1398,17 @@ class BilliardsApp(QMainWindow):
 
         # 1. Target path (orange)
         if len(target_path_px) >= 2:
-            self._draw_trajectory(canvas, target_path_px, color=COLOR_TARGET_PATH)
+            self._draw_trajectory(canvas, target_path_px, color=COLOR_PATH_2)
 
         # 2. Cue path (cyan), extended backwards for aiming
         if len(cue_path_px) >= 2:
             extended = self._extend_path_backward(cue_path_px)
-            self._draw_trajectory(canvas, extended, color=COLOR_TRAJECTORY)
+            self._draw_trajectory(canvas, extended, color=COLOR_PATH)
 
         # 3. Ghost-ball outline at contact point
         if len(cue_path_px) >= 2 and selected_color is not None:
             ghost = cue_path_px[-1]
-            cv2.circle(canvas, ghost, ball_r, COLOR_TRAJECTORY, 2, cv2.LINE_AA)
+            cv2.circle(canvas, ghost, ball_r, COLOR_PATH, 2, cv2.LINE_AA)
 
         # 4. Pocket markers
         for pocket in pockets:
@@ -973,30 +1477,54 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        self.setWindowTitle('Billiards Assistance System')
+        self.setWindowTitle('OptiCue')
         self.setMinimumSize(500, 380)
         self.setStyleSheet(_APP_STYLE)
+
+        # Window icon (silently skipped if missing)
+        import os as _os
+        from PyQt5.QtGui import QIcon as _QIcon
+        _icon_path = _os.path.join(_os.path.dirname(__file__), 'assets', 'opticue_icon.png')
+        if _os.path.exists(_icon_path):
+            self.setWindowIcon(_QIcon(_icon_path))
 
         self._stack = QStackedWidget()
         self.setCentralWidget(self._stack)
 
-        self._setup_page = SetupPage()
+        self._setup_page = SetupPage()                                   # index 0
         self._setup_page.start_requested.connect(self._on_setup_done)
         self._stack.addWidget(self._setup_page)
 
-        self._calib_page = CalibrationPage()
+        self._calib_page = CalibrationPage()                             # index 1
         self._calib_page.calibration_done.connect(self._on_calibration_done)
         self._stack.addWidget(self._calib_page)
 
-        self._ref_page = ReferencePage()
-        self._ref_page.reference_done.connect(self._on_reference_done)
-        self._stack.addWidget(self._ref_page)
+        self._reg_page = PlayerRegistrationPage()                        # index 2
+        self._reg_page.registration_done.connect(self._on_registration_done)
+        self._stack.addWidget(self._reg_page)
 
-        self._stack.addWidget(self._build_main_ui())
+        # ReferencePage is NOT added to the stack — reference is auto-captured
+        # during calibration from self._calib_page._frame.
+
+        self._stack.addWidget(self._build_main_ui())                     # index 3
+
+        self._leaderboard_page = LeaderboardPage()                       # index 4
+        self._leaderboard_page.play_again.connect(self._on_play_again)
+        self._leaderboard_page.recalibrate_requested.connect(self._on_leaderboard_recalibrate)
+        self._leaderboard_page.quit_requested.connect(self.close)
+        self._stack.addWidget(self._leaderboard_page)
 
         self._stack.setCurrentIndex(0)
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage('Configure hardware and click Start.')
+        self.statusBar().setStyleSheet("""
+            background-color: #ece6d8;
+            color: #8a7d68;
+            font-family: 'DM Sans', 'Segoe UI', sans-serif;
+            font-size: 10px;
+            border-top: 1px solid #c4b898;
+            padding: 2px 8px;
+        """)
 
     def _build_main_ui(self) -> QWidget:
         """Build the camera feed + sidebar layout and return it as a QWidget."""
@@ -1009,7 +1537,7 @@ class BilliardsApp(QMainWindow):
         self.camera_label = ClickableLabel()
         self.camera_label.setAlignment(Qt.AlignCenter)
         self.camera_label.setStyleSheet(
-            'background-color: #0a0a1a; border: 2px solid #0f3460; border-radius: 4px;'
+            'background-color: #1a1a1a; border: 1px solid #c4b898; border-radius: 2px;'
         )
         self.camera_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.camera_label.setText('Initialising camera…')
@@ -1019,76 +1547,144 @@ class BilliardsApp(QMainWindow):
 
         # ── Right: sidebar ────────────────────────────────────────────────────
         sidebar = QWidget()
-        sidebar.setFixedWidth(210)
+        sidebar.setFixedWidth(260)
+        sidebar.setStyleSheet('background-color: #ece6d8;')
         sb = QVBoxLayout(sidebar)
-        sb.setContentsMargins(4, 4, 4, 4)
-        sb.setSpacing(6)
+        sb.setContentsMargins(10, 8, 10, 8)
+        sb.setSpacing(4)
 
-        title = QLabel('Billiards\nGolf Game')
+        # Sidebar title
+        title = QLabel()
+        title.setTextFormat(Qt.RichText)
+        title.setText(
+            '<span style="font-family:\'Playfair Display\',Georgia,serif;'
+            ' font-weight:900; font-size:18px; color:#1c3a26;">Opti</span>'
+            '<span style="font-family:\'Playfair Display\',Georgia,serif;'
+            ' font-weight:700; font-style:italic; font-size:18px; color:#d95f1a;">Cue</span>'
+        )
         title.setAlignment(Qt.AlignCenter)
-        tf = QFont()
-        tf.setPointSize(13)
-        tf.setBold(True)
-        title.setFont(tf)
-        title.setStyleSheet('color: #e94560; padding: 4px 0;')
+        title.setStyleSheet('padding: 10px 0 2px 0;')
         sb.addWidget(title)
+
+        subtitle = QLabel('Golf Mode')
+        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setStyleSheet("""
+            font-family: 'Lora', Georgia, serif;
+            font-style: italic;
+            font-size: 11px;
+            color: #8a7d68;
+            padding-bottom: 6px;
+        """)
+        sb.addWidget(subtitle)
         sb.addWidget(self._make_divider())
 
+        _HDR_STYLE = (
+            "font-family: 'DM Sans', 'Segoe UI', sans-serif;"
+            " font-size: 11px; letter-spacing: 2px; color: #4a3f32;"
+            " font-weight: bold; padding-top: 6px;"
+        )
+        _SUB_STYLE = (
+            "font-family: 'DM Sans', 'Segoe UI', sans-serif;"
+            " font-size: 10px; letter-spacing: 1px; color: #6a5f52; padding-top: 2px;"
+        )
+
         hdr = QLabel('GAME STATE')
-        hdr.setStyleSheet('color: #888; font-size: 10px; letter-spacing: 1px;')
+        hdr.setStyleSheet(_HDR_STYLE)
         sb.addWidget(hdr)
 
-        self.lbl_strokes   = self._make_status_label('Strokes: 0')
-        self.lbl_remaining = self._make_status_label('Remaining: —')
-        self.lbl_pocket    = self._make_status_label('Pocket: auto')
-        self.lbl_game_msg  = QLabel('Press Start Game to begin')
-        self.lbl_game_msg.setStyleSheet('color: #e94560; font-size: 11px; font-weight: bold;')
+        # Strokes + Remaining — side-by-side to save vertical space
+        nums_row = QWidget()
+        nr = QHBoxLayout(nums_row)
+        nr.setContentsMargins(0, 0, 0, 0)
+        nr.setSpacing(8)
+        for attr, label_text in (
+            ('lbl_stroke_num', 'STROKES'),
+            ('lbl_remaining_num', 'REMAINING'),
+        ):
+            col = QWidget()
+            cl = QVBoxLayout(col)
+            cl.setContentsMargins(0, 0, 0, 0)
+            cl.setSpacing(2)
+            hdr_lbl = QLabel(label_text)
+            hdr_lbl.setStyleSheet(_SUB_STYLE)
+            num_lbl = QLabel('0')
+            num_lbl.setStyleSheet(
+                "font-family: 'Playfair Display', Georgia, serif;"
+                " font-size: 28px; font-weight: bold; color: #1c3a26;"
+            )
+            cl.addWidget(hdr_lbl)
+            cl.addWidget(num_lbl)
+            setattr(self, attr, num_lbl)
+            nr.addWidget(col)
+        sb.addWidget(nums_row)
+
+        # Target — colored dot + name
+        lbl_t_hdr = QLabel('TARGET')
+        lbl_t_hdr.setStyleSheet(_SUB_STYLE)
+        sb.addWidget(lbl_t_hdr)
+        self.lbl_target = QLabel('—')
+        self.lbl_target.setTextFormat(Qt.RichText)
+        self.lbl_target.setStyleSheet('font-size: 14px; color: #c4b898;')
+        sb.addWidget(self.lbl_target)
+
+        # Ball rack — colored dots for remaining balls
+        lbl_rack_hdr = QLabel('BALL RACK')
+        lbl_rack_hdr.setStyleSheet(_SUB_STYLE)
+        sb.addWidget(lbl_rack_hdr)
+        self.lbl_ball_rack = QLabel('—')
+        self.lbl_ball_rack.setTextFormat(Qt.RichText)
+        self.lbl_ball_rack.setStyleSheet('font-size: 14px; color: #c4b898;')
+        sb.addWidget(self.lbl_ball_rack)
+
+        # Game message (error / status)
+        self.lbl_game_msg = QLabel('')
+        self.lbl_game_msg.setStyleSheet(
+            "color: #d95f1a; font-size: 11px; font-weight: bold;"
+            " font-family: 'DM Sans', 'Segoe UI', sans-serif;"
+        )
         self.lbl_game_msg.setWordWrap(True)
-        for lbl in (self.lbl_strokes, self.lbl_remaining, self.lbl_pocket, self.lbl_game_msg):
-            sb.addWidget(lbl)
+        sb.addWidget(self.lbl_game_msg)
 
         sb.addWidget(self._make_divider())
 
         hdr2 = QLabel('STATUS')
-        hdr2.setStyleSheet('color: #888; font-size: 10px; letter-spacing: 1px;')
+        hdr2.setStyleSheet(_HDR_STYLE)
         sb.addWidget(hdr2)
 
-        self.lbl_mode    = self._make_status_label('Mode: Screen')
-        self.lbl_calib   = self._make_status_label('Calibration: none')
-        self.lbl_detect  = self._make_status_label('Detection: waiting')
-        self.lbl_tracker = self._make_status_label('Tracker: Tracking')
-        for lbl in (self.lbl_mode, self.lbl_calib, self.lbl_detect, self.lbl_tracker):
+        self.lbl_mode_calib  = self._make_status_label('Screen  \u00b7  Calib: none')
+        self.lbl_game_status = self._make_status_label('Game: Setup')
+        for lbl in (self.lbl_mode_calib, self.lbl_game_status):
             sb.addWidget(lbl)
 
         sb.addWidget(self._make_divider())
 
         ctrl_hdr = QLabel('CONTROLS')
-        ctrl_hdr.setStyleSheet('color: #888; font-size: 10px; letter-spacing: 1px;')
+        ctrl_hdr.setStyleSheet(_HDR_STYLE)
         sb.addWidget(ctrl_hdr)
 
         self.btn_start_game  = QPushButton('Start Game')
         self.btn_start_over  = QPushButton('Start Over')
-        self.btn_capture     = QPushButton('Capture Frame')
-        self.btn_reset       = QPushButton('Reset Selection')
+        self.btn_capture     = QPushButton('Capture')
         self.btn_mode        = QPushButton('Switch to Projection')
         self.btn_recalib     = QPushButton('Re-calibrate')
 
+        self.btn_start_over.setObjectName('btn_ghost')
+        self.btn_recalib.setObjectName('btn_accent')
+
         self.btn_start_game.setToolTip('Validate 5 balls and start a new round')
-        self.btn_start_game.setStyleSheet('font-weight: bold;')
         self.btn_start_over.setToolTip('Reset strokes and remaining balls to start a new round')
-        self.btn_capture.setToolTip('Freeze / unfreeze camera feed (Space)')
-        self.btn_reset.setToolTip('Clear pocket selection (R)')
+        self.btn_capture.setToolTip('Save current frame to disk (Space)')
         self.btn_mode.setToolTip('Toggle Screen / Projection (M)')
         self.btn_recalib.setToolTip('Go back to calibration page')
 
         self.btn_start_game.clicked.connect(self._on_start_game)
         self.btn_start_over.clicked.connect(self._on_start_over)
         self.btn_capture.clicked.connect(self._on_capture)
-        self.btn_reset.clicked.connect(self._on_reset)
         self.btn_mode.clicked.connect(self._on_toggle_mode)
         self.btn_recalib.clicked.connect(self._on_recalibrate)
 
-        for btn in (self.btn_start_game, self.btn_start_over, self.btn_capture, self.btn_reset, self.btn_mode, self.btn_recalib):
+        for btn in (self.btn_start_game, self.btn_start_over, self.btn_capture,
+                    self.btn_mode, self.btn_recalib):
             sb.addWidget(btn)
 
         sb.addStretch()
@@ -1097,7 +1693,13 @@ class BilliardsApp(QMainWindow):
             'Click a ◆ pocket to aim manually.\n'
             'Right-click to clear pocket.'
         )
-        hint.setStyleSheet('color: #666; font-size: 11px;')
+        hint.setStyleSheet("""
+            font-family: 'Lora', Georgia, serif;
+            font-style: italic;
+            font-size: 10px;
+            color: #b0a48c;
+            padding: 4px 0;
+        """)
         hint.setAlignment(Qt.AlignCenter)
         hint.setWordWrap(True)
         sb.addWidget(hint)
@@ -1107,15 +1709,18 @@ class BilliardsApp(QMainWindow):
 
     def _make_status_label(self, text: str) -> QLabel:
         lbl = QLabel(text)
-        lbl.setStyleSheet('font-size: 12px; padding: 1px 0;')
+        lbl.setStyleSheet(
+            "font-family: 'DM Sans', 'Segoe UI', sans-serif;"
+            " font-size: 13px; color: #2a2520; padding: 2px 0;"
+        )
         return lbl
 
     def _make_divider(self) -> QFrame:
         line = QFrame()
         line.setObjectName('divider')
         line.setFrameShape(QFrame.HLine)
-        line.setFrameShadow(QFrame.Sunken)
-        line.setStyleSheet('color: #0f3460;')
+        line.setFrameShadow(QFrame.Plain)
+        line.setStyleSheet('background-color: #c4b898; max-height: 1px; border: none;')
         return line
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1127,26 +1732,47 @@ class BilliardsApp(QMainWindow):
         self.use_mock         = not has_camera
         self._wants_projector = has_projector
 
-        if has_camera:
-            self._cap = cv2.VideoCapture(camera_index)
-            if not self._cap.isOpened():
-                print(f'[GUI] Cannot open camera {camera_index}. Falling back to mock.')
-                self._cap = None
-                self.use_mock = True
-                self._on_calibration_done(None)
-                return
-            # Let auto-exposure / white-balance settle
-            for _ in range(5):
-                self._cap.read()
-
-            self._stack.setCurrentIndex(1)
-            self.setMinimumSize(800, 520)
-            self.statusBar().showMessage(
-                'Place 4 table corners or click Auto-detect, then Accept.'
-            )
-            self._calib_page.start_camera(self._cap)
-        else:
+        if not has_camera:
+            # Mock mode — skip calibration entirely
             self._on_calibration_done(None)
+            return
+
+        # Switch to calibration page immediately (non-blocking) and show
+        # the loading bar while the camera opens in a background thread.
+        self._stack.setCurrentIndex(1)   # → CalibrationPage
+        self.setMinimumSize(800, 620)
+        self.statusBar().showMessage('Opening camera\u2026')
+        self._calib_page.start_loading_animation()
+
+        # Open camera in background thread so the UI stays responsive
+        self._cam_thread = CameraOpenThread(camera_index)   # keep ref → no GC
+        self._cam_thread.opened.connect(self._on_camera_opened)
+        self._cam_thread.start()
+
+    def _on_camera_opened(self, cap):
+        """Slot called from CameraOpenThread when camera open attempt completes."""
+        self._calib_page.stop_loading_animation()
+        if cap is None:
+            print(f'[GUI] Cannot open camera {self.camera_index}. Falling back to mock.')
+            self._cap = None
+            self.use_mock = True
+            self._on_calibration_done(None)
+            return
+        self._cap = cap
+        self.statusBar().showMessage('Place 4 corners or Auto-detect, then Accept.')
+        self._calib_page.start_camera(self._cap)
+
+    def _on_registration_done(self, name: str):
+        """Called when the player submits their name on the registration page."""
+        self._current_player_name = name
+        # Camera is already open and calibration already done — go straight to main.
+        self._stack.setCurrentIndex(3)   # → Main view
+        self.setMinimumSize(900, 680)
+        self._start_camera()    # validates cap; no-op if mock
+        self._start_timer()
+        calib_str = 'OK' if self.cam_H is not None else 'none'
+        self.lbl_mode_calib.setText(f'Screen  \u00b7  Calib: {calib_str}')
+        self.statusBar().showMessage('Ready — click a ball to select a target.')
 
     def _on_calibration_done(self, H):
         if H is not None:
@@ -1160,38 +1786,26 @@ class BilliardsApp(QMainWindow):
 
         self._table_corners = self._calib_page.accepted_corners
 
+        # Auto-capture reference frame from the calibration camera
+        ref_frame = getattr(self._calib_page, '_frame', None)
+        if ref_frame is not None:
+            _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(_REF_CACHE), ref_frame)
+            self.ref_path = str(_REF_CACHE)
+            print('[GUI] Reference image auto-captured from calibration frame.')
+        else:
+            self.ref_path = None
+            print('[GUI] No reference frame available — ball detection may be degraded.')
+
         if self._wants_projector and self.cam_H is not None:
             self.statusBar().showMessage('Running projector calibration…')
             QApplication.processEvents()
             self._calibrate_projector_in_memory()
 
-        if self.use_mock:
-            self._on_reference_done(None)
-            return
-
-        # Proceed to reference capture page (same camera session)
-        self._stack.setCurrentIndex(2)
-        self.statusBar().showMessage(
-            'Clear the table and capture a reference image for ball detection.'
-        )
-        self._ref_page.start_camera(self._cap)
-
-    def _on_reference_done(self, ref_path):
-        if ref_path is not None:
-            self.ref_path = str(ref_path)
-            print(f'[GUI] Using reference image: {self.ref_path}')
-        else:
-            self.ref_path = None
-            print('[GUI] No reference image — ball detection may be degraded.')
-
-        self._stack.setCurrentIndex(3)
-        self.setMinimumSize(900, 560)
-        self._start_camera()
-        self._start_timer()
-
-        calib_status = 'OK' if self.cam_H is not None else 'none'
-        self.lbl_calib.setText(f'Calibration: {calib_status}')
-        self.statusBar().showMessage('Ready — click a ball to select a target.')
+        # Always route to PlayerRegistrationPage after calibration
+        self._stack.setCurrentIndex(2)   # → PlayerRegistrationPage
+        self.setMinimumSize(500, 380)
+        self.statusBar().showMessage('Enter your name to begin.')
 
     def _on_recalibrate(self):
         if self._timer is not None:
@@ -1208,9 +1822,51 @@ class BilliardsApp(QMainWindow):
             self._on_calibration_done(None)
             return
 
-        self._stack.setCurrentIndex(1)
-        self.setMinimumSize(800, 520)
+        self._stack.setCurrentIndex(1)   # → CalibrationPage
+        self.setMinimumSize(800, 620)
         self.statusBar().showMessage('Place 4 corners and click Accept.')
+        self._calib_page.start_camera(self._cap)
+
+    def _show_leaderboard(self):
+        """Record current player's score and show the leaderboard page."""
+        name = self._current_player_name
+        if name:
+            self.player_scores.append((name, self._last_stroke_count))
+            self._current_player_name = ''
+
+        ranked = sorted(self.player_scores, key=lambda x: x[1])
+        self._leaderboard_page.update_scores(ranked)
+        self._stack.setCurrentIndex(4)   # → LeaderboardPage
+        self.statusBar().showMessage('Game complete! See the high scores.')
+
+    def _on_play_again(self):
+        """Return to player registration for the next player (same calibration)."""
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+        self._stack.setCurrentIndex(2)   # → PlayerRegistrationPage
+        self.statusBar().showMessage('Enter your name to begin.')
+
+    def _on_leaderboard_recalibrate(self):
+        """Re-calibrate from the leaderboard; after calibration always go to registration."""
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer = None
+        self.cam_H      = None
+        self.proj_H_inv = None
+        self.ref_path   = None
+        self._table_corners = None
+
+        if self._cap is None or not self._cap.isOpened():
+            self.use_mock = True
+            self._on_calibration_done(None)
+            return
+
+        self._stack.setCurrentIndex(1)   # → CalibrationPage
+        self.setMinimumSize(800, 620)
+        self.statusBar().showMessage(
+            'Re-calibrating — place 4 corners and click Accept.'
+        )
         self._calib_page.start_camera(self._cap)
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -1412,7 +2068,7 @@ class BilliardsApp(QMainWindow):
             tp_proj = [p for p in tp_proj if p]
             if len(tp_proj) >= 2:
                 self._draw_trajectory(canvas, tp_proj, thickness=3,
-                                      color=COLOR_TARGET_PATH)
+                                      color=COLOR_PATH_2)
 
         # Cue path (extended backwards)
         if len(cue_path) >= 2:
@@ -1421,13 +2077,13 @@ class BilliardsApp(QMainWindow):
             if len(cp_proj) >= 2:
                 ext = self._extend_path_backward(cp_proj)
                 self._draw_trajectory(canvas, ext, thickness=3,
-                                      color=COLOR_TRAJECTORY)
+                                      color=COLOR_PATH)
 
         # Ghost-ball outline
         if len(cue_path) >= 2 and selected_color is not None:
             ghost_proj = to_proj(cue_path[-1])
             if ghost_proj:
-                cv2.circle(canvas, ghost_proj, 22, COLOR_TRAJECTORY, 2, cv2.LINE_AA)
+                cv2.circle(canvas, ghost_proj, 22, COLOR_PATH, 2, cv2.LINE_AA)
 
         # Pockets
         for pocket in POCKET_POSITIONS_TABLE:
@@ -1464,9 +2120,6 @@ class BilliardsApp(QMainWindow):
             cv2.circle(canvas, center, max(3, radius // 4), (200, 200, 200), -1)
         if selected:
             cv2.circle(canvas, center, radius + 6, COLOR_SELECTION, 3)
-        label = 'cue' if is_cue else str(color_name)[:3]
-        cv2.putText(canvas, label, (center[0] - 10, center[1] + radius + 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
 
     def _draw_pocket(self, canvas, center, selected=False, radius=10):
         x, y = center
@@ -1478,7 +2131,7 @@ class BilliardsApp(QMainWindow):
         if selected:
             cv2.circle(canvas, center, radius + 5, COLOR_POCKET_SEL, 2, cv2.LINE_AA)
 
-    def _draw_trajectory(self, canvas, path_px, thickness=2, color=COLOR_TRAJECTORY):
+    def _draw_trajectory(self, canvas, path_px, thickness=2, color=COLOR_PATH):
         if len(path_px) < 2:
             return
         dash_len, gap_len = 14, 7
@@ -1638,12 +2291,21 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _on_start_game(self):
-        """Validate 5 balls detected, then reset and start a new game."""
+        """Start a new game, or toggle pause/resume if a game is already running."""
         game = getattr(self, 'game', None)
-        balls = getattr(self, '_last_balls', None)
         if game is None:
             self.lbl_game_msg.setText('Game not initialized yet.')
             return
+
+        from golf_game import STATE_SETUP, STATE_GAME_OVER
+        # If a game is active, toggle pause/resume
+        if game.state not in (STATE_SETUP, STATE_GAME_OVER):
+            self.paused = not self.paused
+            self._update_status_panel()
+            return
+
+        # Validate and start a new game
+        balls = getattr(self, '_last_balls', None)
         if not balls:
             self.lbl_game_msg.setText('No balls detected. Place 5 balls on the table.')
             return
@@ -1663,11 +2325,13 @@ class BilliardsApp(QMainWindow):
             )
             return
 
+        self.paused = False
         game.reset(colored)
         self.lbl_game_msg.setText('Game started!')
-        self.lbl_strokes.setText('Strokes: 0')
-        self.lbl_remaining.setText(f'Remaining: {len(colored)}')
+        self.lbl_stroke_num.setText('0')
+        self.lbl_remaining_num.setText(str(len(colored)))
         self.statusBar().showMessage('Game started — make your first shot!')
+        self._update_status_panel()
 
     def _on_start_over(self):
         """Reset game back to SETUP state so the user can press Start Game again."""
@@ -1684,21 +2348,24 @@ class BilliardsApp(QMainWindow):
         game._prev_positions = {}
         game._stationary_frames = 0
         self.lbl_game_msg.setText('Game reset. Place 5 balls and press Start Game.')
-        self.lbl_strokes.setText('Strokes: 0')
-        self.lbl_remaining.setText('Remaining: —')
+        self.lbl_stroke_num.setText('0')
+        self.lbl_remaining_num.setText('0')
         self.statusBar().showMessage('Game reset — place 5 balls on the table.')
+        self._update_status_panel()
 
     def _on_capture(self):
-        self.paused = not self.paused
-        if self.paused:
-            self.btn_capture.setText('Resume Feed')
-            self.btn_capture.setObjectName('btn_mode_active')
-            self.statusBar().showMessage('Feed paused — click Resume to continue.')
-        else:
-            self.btn_capture.setText('Capture Frame')
-            self.btn_capture.setObjectName('')
-            self.statusBar().showMessage('Feed resumed.')
-        self.btn_capture.setStyleSheet('')
+        """Save the current raw camera frame to the captures/ directory."""
+        frame = self.current_frame
+        if frame is None:
+            self.statusBar().showMessage('No frame available to save.')
+            return
+        import datetime
+        captures_dir = os.path.join(os.path.dirname(__file__), 'captures')
+        os.makedirs(captures_dir, exist_ok=True)
+        ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        path = os.path.join(captures_dir, f'capture_{ts}.png')
+        cv2.imwrite(path, frame)
+        self.statusBar().showMessage(f'Frame saved: {path}')
 
     def _on_reset(self):
         """Clear the manual pocket selection. Ball selection is cleared by main.py."""
@@ -1737,29 +2404,64 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _update_status_panel(self):
-        self.lbl_mode.setText(
-            f'Mode: {"Screen" if self.mode == MODE_SCREEN else "Projection"}'
+        mode_str  = 'Screen' if self.mode == MODE_SCREEN else 'Projection'
+        calib_str = 'Calib: OK' if self.cam_H is not None else 'Calib: none'
+        self.lbl_mode_calib.setText(f'{mode_str}  \u00b7  {calib_str}')
+
+        game_str = self._last_game_state.replace('_', ' ').title()
+        self.lbl_game_status.setText(f'Game: {game_str}')
+
+        # Large number displays
+        self.lbl_stroke_num.setText(str(self._last_stroke_count))
+        self.lbl_remaining_num.setText(str(len(self._last_remaining)))
+
+        # Target with colored dot
+        if self._last_selected_color:
+            hex_c = _BALL_HEX.get(self._last_selected_color, '#888888')
+            self.lbl_target.setText(
+                f'<span style="color:{hex_c}; font-size:16px;">●</span>'
+                f' {self._last_selected_color.title()}'
+            )
+            self.lbl_target.setStyleSheet('font-size: 14px; color: #2a2520;')
+        else:
+            self.lbl_target.setText('—')
+            self.lbl_target.setStyleSheet('font-size: 14px; color: #c4b898;')
+
+        # Ball rack — cue ball (white) first, then remaining colored balls
+        if self._last_cue_present:
+            cue_dot = '<span style="color:#f0f0f0; font-size:18px;" title="Cue ball">\u25cf</span>'
+        else:
+            cue_dot = '<span style="color:#555555; font-size:18px;" title="Cue ball \u2014 not on table">\u25cb</span>'
+        colored_dots = ' '.join(
+            f'<span style="color:{_BALL_HEX.get(c, "#888888")}; font-size:18px;">\u25cf</span>'
+            for c in self._last_remaining
         )
-        self.lbl_calib.setText(
-            f'Calibration: {"OK" if self.cam_H is not None else "none"}'
-        )
-        self.lbl_strokes.setText(f'Strokes: {self._last_stroke_count}')
-        self.lbl_remaining.setText(f'Remaining: {len(self._last_remaining)}')
-        self.lbl_pocket.setText(
-            f'Pocket: {self._selected_pocket_name or "auto"}'
-        )
-        self.lbl_detect.setText(
-            f'Game: {self._last_game_state.replace("_", " ").title()}'
-        )
-        self.lbl_tracker.setText(
-            f'Tracker: {self._last_tracker_state.title()}'
-        )
+        rack_html = cue_dot + ('&nbsp;' + colored_dots if colored_dots else '')
+        self.lbl_ball_rack.setText(rack_html)
+
+        # Start Game / Pause / Resume button
+        from golf_game import STATE_SETUP, STATE_GAME_OVER
+        game = getattr(self, 'game', None)
+        if game is None or game.state in (STATE_SETUP, STATE_GAME_OVER):
+            self.btn_start_game.setText('Start Game')
+            self.btn_start_game.setObjectName('btn_accent')
+        elif self.paused:
+            self.btn_start_game.setText('Resume Game')
+            self.btn_start_game.setObjectName('')
+        else:
+            self.btn_start_game.setText('Pause Game')
+            self.btn_start_game.setObjectName('')
+        self.btn_start_game.setStyleSheet('')   # force QSS re-evaluation
+
         if self._last_game_state == 'GAME_OVER':
             self.lbl_game_msg.setText(
                 f'Game Over! All balls pocketed in {self._last_stroke_count} strokes.'
             )
+            # Trigger leaderboard (only once, while we're still on the main page)
+            if self._stack.currentIndex() == 3:
+                self._show_leaderboard()
         elif self._last_game_state == 'SETUP':
-            self.lbl_game_msg.setText('Press Start Game to begin')
+            self.lbl_game_msg.setText('')
 
     # ─────────────────────────────────────────────────────────────────────────
     # Keyboard shortcuts
@@ -1788,7 +2490,6 @@ class BilliardsApp(QMainWindow):
     def closeEvent(self, event):
         # Stop all page timers
         self._calib_page._stop_camera()
-        self._ref_page._stop_camera()
         if self._timer is not None:
             self._timer.stop()
         # Single camera release point
@@ -1827,9 +2528,6 @@ def draw_overlay(image: np.ndarray,
                    (255, 255, 255) if is_cue else (40, 40, 40), 2)
         if is_cue:
             cv2.circle(canvas, center, max(3, radius // 4), (200, 200, 200), -1)
-        cv2.putText(canvas, 'cue' if is_cue else str(ball.get('color', 'gray'))[:3],
-                    (center[0] - 10, center[1] + radius + 14),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.42, (220, 220, 220), 1, cv2.LINE_AA)
     return canvas
 
 
@@ -1857,7 +2555,7 @@ def _draw_trajectory_static(canvas: np.ndarray,
             if dash:
                 a = (int(p1[0] + unit[0] * drawn), int(p1[1] + unit[1] * drawn))
                 b = (int(p1[0] + unit[0] * end),   int(p1[1] + unit[1] * end))
-                cv2.line(canvas, a, b, COLOR_TRAJECTORY, thickness, cv2.LINE_AA)
+                cv2.line(canvas, a, b, COLOR_PATH, thickness, cv2.LINE_AA)
             drawn += chunk
             dash   = not dash
     if len(path_px) >= 2:
@@ -1868,7 +2566,7 @@ def _draw_trajectory_static(canvas: np.ndarray,
         for delta in (+0.42, -0.42):
             ax = int(end_pt[0] - 16 * np.cos(angle + delta))
             ay = int(end_pt[1] - 16 * np.sin(angle + delta))
-            cv2.line(canvas, end_pt, (ax, ay), COLOR_TRAJECTORY,
+            cv2.line(canvas, end_pt, (ax, ay), COLOR_PATH,
                      thickness + 1, cv2.LINE_AA)
 
 
