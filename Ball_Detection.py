@@ -7,12 +7,30 @@ Assumptions:
 - Balls are colored and non-green; detection is based on color segmentation and circle finding.
 """
 
-from typing import Iterable, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
+import os
 import cv2
 import numpy as np
 
 Point = Tuple[float, float]
 BBox = Tuple[int, int, int, int]  # x, y, w, h
+
+_ref_cache: Dict[str, Tuple[float, np.ndarray]] = {}
+
+
+def _load_ref_image(ref_path: str) -> Optional[np.ndarray]:
+    """Load and cache the reference image, reloading when the file changes."""
+    try:
+        mtime = os.path.getmtime(ref_path)
+    except OSError:
+        return None
+    cached = _ref_cache.get(ref_path)
+    if cached is not None and cached[0] == mtime:
+        return cached[1]
+    img = cv2.imread(ref_path)
+    if img is not None:
+        _ref_cache[ref_path] = (mtime, img)
+    return img
 class BallDetection:
     def __init__(self, center: Tuple[float, float], radius_px: float, bbox: BBox) -> None:
         self.center = center
@@ -418,14 +436,18 @@ def detect_balls(
     if corners_arr.shape[0] != 4:
         raise ValueError("table_corners must contain exactly 4 points.")
 
-    ref_bgr = cv2.imread(ref_path)
+    ref_bgr = _load_ref_image(ref_path)
     if ref_bgr is None:
         raise ValueError(f"Failed to read reference image: {ref_path}")
     if ref_bgr.shape[:2] != frame_bgr.shape[:2]:
         raise ValueError("Reference and current frame must have the same resolution.")
-    corners_arr = _order_points_clockwise(corners_arr)#keep consisted corner ordering
-    table_mask = _table_mask(frame_bgr.shape, corners_arr)#mask inside corners
-    diff_bgr = cv2.absdiff(frame_bgr, ref_bgr)
+    corners_arr = _order_points_clockwise(corners_arr)
+    table_mask = _table_mask(frame_bgr.shape, corners_arr)
+    # Mild blur on both sides suppresses per-frame sensor noise / compression
+    # artifacts that cause flickering false positives in video.
+    blur_frame = cv2.GaussianBlur(frame_bgr, (5, 5), 0)
+    blur_ref   = cv2.GaussianBlur(ref_bgr,   (5, 5), 0)
+    diff_bgr   = cv2.absdiff(blur_frame, blur_ref)
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     if cfg.clahe_enabled:
         clahe = cv2.createCLAHE(

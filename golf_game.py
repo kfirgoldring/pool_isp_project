@@ -51,9 +51,10 @@ POCKET_POSITIONS_CM: List[Tuple[float, float]] = [
 POCKET_RADIUS_CM: float = 8.0   # a ball within this distance of a pocket is "pocketed"
 
 # A ball that moves more than this between ticks is considered "in motion".
-# Derived from 5 px threshold / 8 px-per-cm display scale.
-# ⚠ TUNABLE — validate against real camera footage before finalising.
-MOVEMENT_THRESHOLD_CM: float = 0.625
+# With the tracker's 1 cm dead-zone, smoothed positions are rock-stable when
+# balls are stationary.  2 cm comfortably exceeds residual jitter while still
+# catching even the gentlest real tap (which moves a ball several cm).
+MOVEMENT_THRESHOLD_CM: float = 2.0
 
 # Number of consecutive frames all balls must be stationary to end IN_PROGRESS.
 STATIONARY_FRAMES_REQUIRED: int = 10
