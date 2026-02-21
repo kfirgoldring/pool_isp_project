@@ -14,21 +14,23 @@ def is_path_blocked(
     b_cm: Tuple[float, float],
     obstacles: List[Tuple[float, float]],
     ball_radius_cm: float = BALL_RADIUS_CM,
+    buffer_cm: float = 0.0,
 ) -> bool:
     """
     Return True if any ball in *obstacles* physically blocks the straight
     line segment a_cm → b_cm.
 
     A ball at position P blocks the segment when its perpendicular distance
-    to the segment is less than 2 * ball_radius_cm (the combined diameter of
-    the rolling ball and the obstacle) AND the closest point on the segment
-    to P lies between the endpoints (t ∈ [0, 1]).
+    to the segment is less than 2 * ball_radius_cm + buffer_cm AND the
+    closest point on the segment to P lies between the endpoints (t ∈ [0, 1]).
 
     Parameters
     ----------
     a_cm, b_cm      : endpoints of the segment in table cm.
     obstacles       : list of (x, y) ball centre positions to test.
     ball_radius_cm  : radius of a ball (default = BALL_RADIUS_CM from config).
+    buffer_cm       : extra clearance margin added to the block distance.
+                      Use 0.5 for the cue path to account for calibration error.
     """
     dx = b_cm[0] - a_cm[0]
     dy = b_cm[1] - a_cm[1]
@@ -36,7 +38,7 @@ def is_path_blocked(
     if L2 < 1e-12:
         return False
 
-    block_dist = 2.0 * ball_radius_cm
+    block_dist = 2.0 * ball_radius_cm + buffer_cm
 
     for ox, oy in obstacles:
         apx = ox - a_cm[0]

@@ -9,7 +9,7 @@ Pipeline (called every 33 ms via QTimer):
   3. _adapt_detections(...)         — convert to internal dict format with center_cm
   4. game.update(balls)             — advance state machine
   5. app.consume_pending_clicks()   — process user ball-selection clicks
-  6. calculate_path / suggest_best_shot — compute trajectory in table cm
+  6. suggest_best_shot — compute trajectory in table cm
   7. app.render(...)                — draw overlays and display
 
 Coordinate system rule:
@@ -29,7 +29,7 @@ from golf_game import (
     GolfGame,
     STATE_WAITING,
 )
-from trajectory import calculate_path, suggest_best_shot
+from trajectory import suggest_best_shot
 
 # ── Table constants (keep in sync with golf_game.py / trajectory.py) ─────────
 TABLE_WIDTH_CM  = 122.0
@@ -378,27 +378,20 @@ def _run_tick(window, game: GolfGame, tracker: _BallTracker) -> None:
         cue_ball = game.get_cue_ball(balls)
         if cue_ball is not None and cue_ball.get('center_cm') is not None:
             cue_cm = cue_ball['center_cm']
-            target_ball = game.get_target_ball(balls)
-
-            if target_ball is not None and target_ball.get('center_cm') is not None:
-                cue_path, target_path = calculate_path(
-                    cue_cm,
-                    target_ball['center_cm'],
-                    window.selected_pocket_cm,
+            remaining_dicts = [
+                b for b in balls
+                if not b.get('is_cue')
+                and b.get('center_cm') is not None
+                and b.get('color') in game.remaining_balls
+            ]
+            if remaining_dicts:
+                best_ball, cue_path, target_path = suggest_best_shot(
+                    cue_cm, remaining_dicts, all_balls=balls
                 )
-            else:
-                remaining_dicts = [
-                    b for b in balls
-                    if not b.get('is_cue')
-                    and b.get('center_cm') is not None
-                    and b.get('color') in game.remaining_balls
-                ]
-                if remaining_dicts:
-                    best_ball, cue_path, target_path = suggest_best_shot(
-                        cue_cm, remaining_dicts, all_balls=balls
-                    )
-                    if best_ball is not None:
-                        game.select_target(best_ball['color'])
+                if best_ball is not None:
+                    game.select_target(best_ball['color'])
+                else:
+                    game.selected_target_color = None
 
     # 7. Render
     window.render(

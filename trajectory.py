@@ -16,6 +16,10 @@ POCKET_POSITIONS_CM: List[Tuple[float, float]] = [
 ]
 # Expands to: [(0,0), (61,0), (122,0), (0,61), (61,61), (122,61)]
 
+# Squared distance threshold for excluding the cue/target ball from the obstacle list.
+# Avoids fragile exact float equality after homography conversion.
+_EXCLUDE_DIST_SQ: float = (BALL_RADIUS_CM * 0.5) ** 2
+
 
 # â"€â"€â"€ Public API â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 def calculate_path(
@@ -105,7 +109,10 @@ def suggest_best_shot(
       • Direct shot (unblocked cue path + unblocked target path):
           score = 0.6 * angle_score + 0.2 * dist_ct_score + 0.2 * dist_tp_score
       • Bank shot (target bounces off 1 cushion, needed when target→pocket blocked):
-          score = same formula  +  0.3 penalty
+          score = same formula  +  0.2 penalty
+      Angle score is quadratic (angle/π)² to penalise large cut angles harshly.
+      A near-miss clearance penalty (up to +0.1) is added for cue paths that
+      barely clear an obstacle.
       Candidates where the cue→ghost path is blocked are skipped entirely.
     The pair with the lowest score wins.
     """
@@ -136,8 +143,14 @@ def suggest_best_shot(
         if shot_dist < 1e-6:
             continue
 
-        # Obstacles for this ball: all balls except the cue and this target
-        obstacles = [c for c in all_centers if c != cue_cm and c != bpos]
+        # Obstacles for this ball: all balls except the cue and this target.
+        # Use a distance threshold instead of exact equality to be robust against
+        # floating-point rounding introduced by homography conversion.
+        obstacles = [
+            c for c in all_centers
+            if (c[0]-cue_cm[0])**2 + (c[1]-cue_cm[1])**2 > _EXCLUDE_DIST_SQ
+            and (c[0]-bpos[0])**2 + (c[1]-bpos[1])**2 > _EXCLUDE_DIST_SQ
+        ]
 
         for pocket in POCKET_POSITIONS_CM:
             px, py = pocket
@@ -152,8 +165,9 @@ def suggest_best_shot(
             ux, uy = to_pocket_dx / pocket_norm, to_pocket_dy / pocket_norm
             ghost_cm = (bx - ux * 2 * BALL_RADIUS_CM, by - uy * 2 * BALL_RADIUS_CM)
 
-            # If the cue can't reach the ghost ball, skip this (ball, pocket) pair
-            if obstacles and is_path_blocked(cue_cm, ghost_cm, obstacles):
+            # If the cue can't reach the ghost ball, skip this (ball, pocket) pair.
+            # buffer_cm=0.5 adds a small real-world safety margin for calibration error.
+            if obstacles and is_path_blocked(cue_cm, ghost_cm, obstacles, buffer_cm=0.5):
                 continue
 
             # Angle between shot direction and target->pocket direction
@@ -175,6 +189,7 @@ def suggest_best_shot(
                     'bank_penalty': 0.0,
                     'cue_path':    [(cx, cy), ghost_cm],
                     'target_path': [bpos, pocket],
+                    'obstacles':   obstacles,
                 })
             else:
                 # Try 1-cushion bank shots for the target→pocket segment
@@ -191,7 +206,7 @@ def suggest_best_shot(
                                   by - bank_uy * 2 * BALL_RADIUS_CM)
 
                     # Cue must also reach the bank ghost position
-                    if obstacles and is_path_blocked(cue_cm, bank_ghost, obstacles):
+                    if obstacles and is_path_blocked(cue_cm, bank_ghost, obstacles, buffer_cm=0.5):
                         continue
 
                     # Angle for bank: between (cue→target) and (target→wall_hit)
@@ -212,9 +227,10 @@ def suggest_best_shot(
                         'angle':        bank_angle,
                         'dist_ct':      shot_dist,
                         'dist_tp':      bank_tp_dist,
-                        'bank_penalty': 0.3,
+                        'bank_penalty': 0.2,
                         'cue_path':     [(cx, cy), bank_ghost],
                         'target_path':  bank_path,
+                        'obstacles':    obstacles,
                     })
 
     if not candidates:
@@ -234,7 +250,11 @@ def suggest_best_shot(
     w_tp    = 0.2  # weight of distance target-pocket
 
     for c in candidates:
-        angle_score = c['angle'] / math.pi  # normalized 0..1
+        # Quadratic angle penalty: small cuts stay easy, large cuts penalised harshly.
+        # A 30° cut scores 0.028 (was 0.167 linear). A 75° cut scores 0.174 (was 0.42).
+        angle_norm  = c['angle'] / math.pi  # 0..1
+        angle_score = angle_norm ** 2
+
         ct_score = 0.0 if ct_range < 1e-6 else (c['dist_ct'] - min_ct) / ct_range
         tp_score = 0.0 if tp_range < 1e-6 else (c['dist_tp'] - min_tp) / tp_range
 
@@ -243,6 +263,11 @@ def suggest_best_shot(
                  + w_tp * tp_score
                  + c['bank_penalty'])
 
+        # Near-miss penalty: add up to +0.1 when the cue path barely clears an obstacle.
+        cue_clr = _min_clearance(cue_cm, c['cue_path'][1], c['obstacles'])
+        if 0 < cue_clr < BALL_RADIUS_CM:
+            score += 0.1 * (1.0 - cue_clr / BALL_RADIUS_CM)
+
         if score < best_score:
             best_score     = score
             best_ball      = c['ball']
@@ -250,6 +275,37 @@ def suggest_best_shot(
             best_target_path = c['target_path']
 
     return best_ball, best_cue_path, best_target_path
+
+
+def _min_clearance(
+    a_cm: Tuple[float, float],
+    b_cm: Tuple[float, float],
+    obstacles: List[Tuple[float, float]],
+) -> float:
+    """
+    Return the smallest signed clearance between any obstacle and segment a→b.
+
+    Clearance = (perpendicular distance from obstacle centre to segment) - 2*BALL_RADIUS_CM.
+    Positive means the path is clear. Negative means it is blocked.
+    Returns +inf when there are no obstacles.
+    """
+    if not obstacles:
+        return float('inf')
+    dx = b_cm[0] - a_cm[0]
+    dy = b_cm[1] - a_cm[1]
+    L2 = dx * dx + dy * dy
+    if L2 < 1e-12:
+        return float('inf')
+    min_clr = float('inf')
+    for ox, oy in obstacles:
+        apx = ox - a_cm[0]
+        apy = oy - a_cm[1]
+        t    = max(0.0, min(1.0, (apx * dx + apy * dy) / L2))
+        perp = math.hypot(ox - (a_cm[0] + t * dx), oy - (a_cm[1] + t * dy))
+        clr  = perp - 2.0 * BALL_RADIUS_CM
+        if clr < min_clr:
+            min_clr = clr
+    return min_clr
 
 
 def _choose_best_pocket(
