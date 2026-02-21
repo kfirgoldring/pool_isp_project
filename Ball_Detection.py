@@ -48,11 +48,10 @@ class BallDetectionConfig:
         min_circularity: float = 0.6,
         min_area_px: int = 60,
         non_green_ratio: float = 0.3,
-        edge_margin: float = 0.0,
+        edge_margin: float = 0.03,
         hue_similarity_thresh: float = 10.0,
-        # Color classification thresholds (HSV)
-        orange_hue: Tuple[int, int] = (10, 25),
-        yellow_hue: Tuple[int, int] = (25, 35),
+        # Color classification thresholds (HSV
+        yellow_hue: Tuple[int, int] = (10, 20),
         blue_hue: Tuple[int, int] = (95, 115),
         purple_hue: Tuple[int, int] = (120, 140),
         red1_hue: Tuple[int, int] = (0, 10),
@@ -89,7 +88,6 @@ class BallDetectionConfig:
         # If bbox mean hue is within this threshold of table hue, drop it
         self.hue_similarity_thresh = hue_similarity_thresh
         # Color classification thresholds
-        self.orange_hue = orange_hue
         self.yellow_hue = yellow_hue
         self.blue_hue = blue_hue
         self.purple_hue = purple_hue
@@ -327,8 +325,6 @@ def _classify_color(
         return "unknown"
 
     h = float(median_hue)
-    if cfg.orange_hue[0] <= h <= cfg.orange_hue[1]:
-        return "orange"
     if cfg.yellow_hue[0] <= h <= cfg.yellow_hue[1]:
         return "yellow"
     if cfg.blue_hue[0] <= h <= cfg.blue_hue[1]:
@@ -632,7 +628,6 @@ if __name__ == "__main__":
             cv2.LINE_AA,
         )
     cv2.imwrite("pool_table_annotated.jpeg", vis)
-
     print(f"detections: {len(dets)}")
     for i, d in enumerate(dets):
         median_hue = _median_hue_in_bbox(hsv, d.bbox, cfg.green_min_sat, cfg.green_min_val)
