@@ -45,8 +45,8 @@ class BallDetectionConfig:
         hough_dp: float = 1.2,
         hough_param1: float = 120.0,
         hough_param2: float = 14.0,
-        min_circularity: float = 0.45,
-        min_area_px: int = 60,
+        min_circularity: float = 0.4,
+        min_area_px: int = 200,
         diff_ratio: float = 0.3,
         edge_margin: float = 0,
         hue_similarity_thresh: float = 10.0,
@@ -266,22 +266,9 @@ def _classify_color(
         mean_s, mean_v = sv
         if mean_s <= cfg.white_sat_max and mean_v >= cfg.white_val_min:
             return "white"
-        dark_ratio = _dark_ratio_in_bbox(
-            hsv,
-            bbox,
-            cfg.black_pixel_val_max,
-            sat_max=cfg.black_sat_for_dark,
-            inner_scale=cfg.black_inner_scale,
-        )
-        if mean_v <= cfg.black_val_max or (
-            dark_ratio is not None and dark_ratio >= cfg.black_dark_ratio_min
-        ):
-            return "black"
-
     median_hue = _median_hue_in_bbox(hsv, bbox, cfg.green_min_sat, cfg.green_min_val)
     if median_hue is None:
         return "unknown"
-
     h = float(median_hue)
     if cfg.yellow_hue[0] <= h <= cfg.yellow_hue[1]:
         return "yellow"
@@ -291,13 +278,13 @@ def _classify_color(
         return "purple"
     if (cfg.red1_hue[0] <= h <= cfg.red1_hue[1]) or (cfg.red2_hue[0] <= h <= cfg.red2_hue[1]):
         return "bordeaux"
-
-    return "unknown"
+    else:
+        return "unknown"
 
 def _estimate_ball_radius_px(
     corners: np.ndarray,
-    ball_diameter_cm:1.5,
-    table_size_cm: 120.0,
+    ball_diameter_cm=1.5,
+    table_size_cm=120.0,
 ) -> Optional[float]:
     if ball_diameter_cm is None or table_size_cm is None:
         return None
@@ -421,55 +408,28 @@ def detect_balls(
         min_r = 8
         max_r = 40
         min_dist = 20
-
-    circles = cv2.HoughCircles(
-        gray,
-        cv2.HOUGH_GRADIENT,
-        dp=cfg.hough_dp,
-        minDist=min_dist,
-        param1=cfg.hough_param1,
-        param2=cfg.hough_param2,
-        minRadius=min_r,
-        maxRadius=max_r,
-    )
-
+#contour-based detection on diff mask
+    contours, _ = cv2.findContours(diff_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     detections: List[BallDetection] = []
-    if circles is not None:
-        circles = np.squeeze(circles, axis=0)
-        for x, y, r in circles:
-            if _circle_diff_ratio(diff_mask, (x, y), r) < cfg.diff_ratio:
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area < cfg.min_area_px:
+            continue
+        perimeter = cv2.arcLength(cnt, True)
+        if perimeter <= 1e-3:
+            continue
+        circularity = 4.0 * np.pi * area / (perimeter * perimeter)
+        if circularity < cfg.min_circularity:
+            continue
+        (x, y), r = cv2.minEnclosingCircle(cnt)
+        if expected_radius is not None:
+            if r < 0.6 * expected_radius or r > 1.5 * expected_radius:
                 continue
-            x0 = int(round(x - r))
-            y0 = int(round(y - r))
-            w = int(round(2 * r))
-            h = int(round(2 * r))
-            detections.append(
-                BallDetection(center=(float(x), float(y)), radius_px=float(r), bbox=(x0, y0, w, h))
-            )
-    detections = []
-
-    # Fallback to contour-based detection on diff mask
-    if not detections:
-        contours, _ = cv2.findContours(diff_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        for cnt in contours:
-            area = cv2.contourArea(cnt)
-            if area < cfg.min_area_px:
-                continue
-            perimeter = cv2.arcLength(cnt, True)
-            if perimeter <= 1e-3:
-                continue
-            circularity = 4.0 * np.pi * area / (perimeter * perimeter)
-            if circularity < cfg.min_circularity:
-                continue
-            (x, y), r = cv2.minEnclosingCircle(cnt)
-            if expected_radius is not None:
-                if r < 0.6 * expected_radius or r > 1.5 * expected_radius:
-                    continue
-            x0 = int(round(x - r))
-            y0 = int(round(y - r))
-            w = int(round(2 * r))
-            h = int(round(2 * r))
-            detections.append(
+        x0 = int(round(x - r))
+        y0 = int(round(y - r))
+        w = int(round(2 * r))
+        h = int(round(2 * r))
+        detections.append(
                 BallDetection(center=(float(x), float(y)), radius_px=float(r), bbox=(x0, y0, w, h))
             )
 
@@ -523,8 +483,6 @@ def detect_balls_with_color(
     if not out:
         return np.empty((0, 3), dtype=object)
     return np.array(out, dtype=object)
-
-
 def draw_detections(
     frame_bgr: np.ndarray,
     detections: Iterable[BallDetection],
@@ -555,8 +513,8 @@ def draw_detections(
 
 
 if __name__ == "__main__":
-    ref_path="ref.jpeg"
-    img_path="img_5.jpeg"
+    ref_path="WhatsApp Image 2026-02-21 at 17.47.54.jpeg"
+    img_path="WhatsApp Image 2026-02-21 at 17.47.55.jpeg"
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
@@ -587,6 +545,8 @@ if __name__ == "__main__":
     print(f"detections: {len(dets)}")
     for i, d in enumerate(dets):
         median_hue = _median_hue_in_bbox(hsv, d.bbox, cfg.green_min_sat, cfg.green_min_val)
-        print(i, d.center, d.bbox, d.radius_px, "median_hue", median_hue)
+        x, y, w, h = d.bbox
+        px_area = w * h
+        print(i, d.center, d.bbox, d.radius_px, "px_area", px_area, "median_hue", median_hue)
     print("colored detections:")
     print(colored)
