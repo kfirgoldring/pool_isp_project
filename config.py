@@ -25,6 +25,8 @@ MIN_REQUIRED_MATCHES = 12  # Minimum circles needed for calibration
 TABLE_WIDTH_CM = 122.0
 TABLE_HEIGHT_CM = 61.0
 
+#Ball radius (in cm)
+BALL_RADIUS_CM = 1.5
 # Table boundary margin (in table coordinates) - reject circles near edge
 TABLE_MARGIN_CM = 5.0
 
