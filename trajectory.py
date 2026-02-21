@@ -1,5 +1,5 @@
 ﻿"""
-trajectory.py â€” Pure shot-geometry functions for the billiards golf game.
+trajectory.py â€" Pure shot-geometry functions for the billiards golf game.
 No state, no GUI, no OpenCV, no Qt.
 All coordinates are in table centimetres (origin = top-left pocket).
 Table is 122 cm Ã— 61 cm with 6 pockets at corners and mid-long-edges.
@@ -7,8 +7,9 @@ Table is 122 cm Ã— 61 cm with 6 pockets at corners and mid-long-edges.
 import math
 from typing import Dict, List, Optional, Tuple
 from config import BALL_RADIUS_CM, TABLE_HEIGHT_CM, TABLE_WIDTH_CM
-# â”€â”€â”€ Table constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-# Pocket positions derived from table dimensions â€” 6 pockets at corners and mid-edges.
+from Physics_Engine import is_path_blocked, find_bank_target_paths
+# â"€â"€â"€ Table constants â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
+# Pocket positions derived from table dimensions â€" 6 pockets at corners and mid-edges.
 POCKET_POSITIONS_CM: List[Tuple[float, float]] = [
     (k * TABLE_WIDTH_CM / 2, j * TABLE_HEIGHT_CM)
     for j in (0, 1) for k in (0, 1, 2)
@@ -16,11 +17,12 @@ POCKET_POSITIONS_CM: List[Tuple[float, float]] = [
 # Expands to: [(0,0), (61,0), (122,0), (0,61), (61,61), (122,61)]
 
 
-# â”€â”€â”€ Public API â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# â"€â"€â"€ Public API â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 def calculate_path(
     cue_cm:    Tuple[float, float],
     target_cm: Tuple[float, float],
     pocket_cm: Optional[Tuple[float, float]] = None,
+    obstacles: Optional[List[Tuple[float, float]]] = None,
 ) -> Tuple[List[Tuple[float, float]], List[Tuple[float, float]]]:
     """
     Ghost-ball geometry for a single billiards shot.
@@ -31,6 +33,8 @@ def calculate_path(
     target_cm : (x, y) of target ball in table centimetres.
     pocket_cm : (x, y) of destination pocket in table centimetres.
                 Pass None (default) to auto-select the best pocket.
+    obstacles : list of (x, y) ball centres that may block the path.
+                Used only when pocket_cm is None (for pocket auto-selection).
 
     Returns
     -------
@@ -54,14 +58,14 @@ def calculate_path(
 
     if pocket_cm is None:
         shot_dir = (tx - cx, ty - cy)
-        pocket_cm = _choose_best_pocket(target_cm, shot_dir)
+        pocket_cm = _choose_best_pocket(target_cm, shot_dir, obstacles)
     px, py = pocket_cm
     # Vector from target to pocket
     dx, dy = px - tx, py - ty
     dist = math.hypot(dx, dy)
     if dist < 1e-6:
         return [], []
-    # Unit vector target â†’ pocket
+    # Unit vector target â†' pocket
     ux, uy = dx / dist, dy / dist
     # Ghost-ball position: step back from target by 2 ball diameters
     gx = tx - ux * 2 * BALL_RADIUS_CM
@@ -73,6 +77,7 @@ def calculate_path(
 def suggest_best_shot(
     cue_cm:          Tuple[float, float],
     remaining_balls: List[Dict],
+    all_balls:       Optional[List[Dict]] = None,
 ) -> Tuple[Optional[Dict], List[Tuple[float, float]], List[Tuple[float, float]]]:
     """
     Select the easiest ball to pocket from the cue ball's current position.
@@ -82,21 +87,27 @@ def suggest_best_shot(
     cue_cm          : (x, y) of cue ball in table centimetres.
     remaining_balls : list of ball dicts, each must have 'center_cm' and 'color'.
                       Only balls whose 'center_cm' is not None are considered.
+    all_balls       : full list of all ball dicts on the table (used to build
+                      per-shot obstacle lists for blocking checks). If None,
+                      obstacle detection is skipped (backward-compatible).
 
     Returns
     -------
     (best_ball_dict, cue_path, target_path)
       best_ball_dict : the ball dict with the easiest shot, or None if no candidates.
       cue_path       : ghost-ball cue path in table cm (2 points).
-      target_path    : target-to-pocket path in table cm (2 points).
+      target_path    : target-to-pocket path in table cm (2 or 3 points).
+                       3-point paths indicate a 1-cushion bank shot.
 
     Scoring heuristic
     -----------------
-    For every (ball, pocket) pair compute a normalized score:
-      - angle between shot vector (cue -> ball) and target-to-pocket (ball -> pocket)
-      - distance from cue to target
-      - distance from target to pocket
-    The pair with the lowest weighted score is considered easiest.
+    For every (ball, pocket) pair:
+      • Direct shot (unblocked cue path + unblocked target path):
+          score = 0.6 * angle_score + 0.2 * dist_ct_score + 0.2 * dist_tp_score
+      • Bank shot (target bounces off 1 cushion, needed when target→pocket blocked):
+          score = same formula  +  0.3 penalty
+      Candidates where the cue→ghost path is blocked are skipped entirely.
+    The pair with the lowest score wins.
     """
     best_ball: Optional[Dict] = None
     best_cue_path: List[Tuple[float, float]] = []
@@ -104,6 +115,14 @@ def suggest_best_shot(
     best_score = float('inf')
 
     cx, cy = cue_cm
+
+    # Build a lookup of all ball centres for obstacle checking
+    all_centers: List[Tuple[float, float]] = []
+    if all_balls is not None:
+        for b in all_balls:
+            c = b.get('center_cm')
+            if c is not None:
+                all_centers.append(c)
 
     candidates: List[Dict] = []
     for ball in remaining_balls:
@@ -117,6 +136,9 @@ def suggest_best_shot(
         if shot_dist < 1e-6:
             continue
 
+        # Obstacles for this ball: all balls except the cue and this target
+        obstacles = [c for c in all_centers if c != cue_cm and c != bpos]
+
         for pocket in POCKET_POSITIONS_CM:
             px, py = pocket
             to_pocket_dx = px - bx
@@ -125,19 +147,75 @@ def suggest_best_shot(
             if pocket_dist < 1e-6:
                 continue
 
+            # Ghost ball for a direct shot to this pocket
+            pocket_norm = math.hypot(to_pocket_dx, to_pocket_dy)
+            ux, uy = to_pocket_dx / pocket_norm, to_pocket_dy / pocket_norm
+            ghost_cm = (bx - ux * 2 * BALL_RADIUS_CM, by - uy * 2 * BALL_RADIUS_CM)
+
+            # If the cue can't reach the ghost ball, skip this (ball, pocket) pair
+            if obstacles and is_path_blocked(cue_cm, ghost_cm, obstacles):
+                continue
+
             # Angle between shot direction and target->pocket direction
             cosang = (shot_dx * to_pocket_dx + shot_dy * to_pocket_dy) / (shot_dist * pocket_dist)
             cosang = max(-1.0, min(1.0, cosang))
             angle = math.acos(cosang)
 
-            candidates.append({
-                'ball': ball,
-                'bpos': bpos,
-                'pocket': pocket,
-                'angle': angle,
-                'dist_ct': shot_dist,
-                'dist_tp': pocket_dist,
-            })
+            tp_blocked = bool(obstacles) and is_path_blocked(bpos, pocket, obstacles)
+
+            if not tp_blocked:
+                # Direct shot
+                candidates.append({
+                    'ball':        ball,
+                    'bpos':        bpos,
+                    'pocket':      pocket,
+                    'angle':       angle,
+                    'dist_ct':     shot_dist,
+                    'dist_tp':     pocket_dist,
+                    'bank_penalty': 0.0,
+                    'cue_path':    [(cx, cy), ghost_cm],
+                    'target_path': [bpos, pocket],
+                })
+            else:
+                # Try 1-cushion bank shots for the target→pocket segment
+                bank_paths = find_bank_target_paths(bpos, pocket, obstacles)
+                for bank_path in bank_paths:
+                    wall_hit = bank_path[1]
+                    wdx = wall_hit[0] - bx
+                    wdy = wall_hit[1] - by
+                    wdist = math.hypot(wdx, wdy)
+                    if wdist < 1e-9:
+                        continue
+                    bank_ux, bank_uy = wdx / wdist, wdy / wdist
+                    bank_ghost = (bx - bank_ux * 2 * BALL_RADIUS_CM,
+                                  by - bank_uy * 2 * BALL_RADIUS_CM)
+
+                    # Cue must also reach the bank ghost position
+                    if obstacles and is_path_blocked(cue_cm, bank_ghost, obstacles):
+                        continue
+
+                    # Angle for bank: between (cue→target) and (target→wall_hit)
+                    bank_cosang = (shot_dx * wdx + shot_dy * wdy) / (shot_dist * wdist)
+                    bank_cosang = max(-1.0, min(1.0, bank_cosang))
+                    bank_angle = math.acos(bank_cosang)
+
+                    # Total path length for target: target→wall + wall→pocket
+                    dist_wall_to_pocket = math.hypot(
+                        pocket[0] - wall_hit[0], pocket[1] - wall_hit[1]
+                    )
+                    bank_tp_dist = wdist + dist_wall_to_pocket
+
+                    candidates.append({
+                        'ball':         ball,
+                        'bpos':         bpos,
+                        'pocket':       pocket,
+                        'angle':        bank_angle,
+                        'dist_ct':      shot_dist,
+                        'dist_tp':      bank_tp_dist,
+                        'bank_penalty': 0.3,
+                        'cue_path':     [(cx, cy), bank_ghost],
+                        'target_path':  bank_path,
+                    })
 
     if not candidates:
         return None, [], []
@@ -151,20 +229,25 @@ def suggest_best_shot(
     tp_range = max_tp - min_tp
 
     # Weights should sum to 1.0
-    w_angle = 0.6#weight of angle between shot and target-to-pocket
-    w_ct    = 0.2#weight of distance cue-target
-    w_tp    = 0.2#weight of distance target-pocket
+    w_angle = 0.6  # weight of angle between shot and target-to-pocket
+    w_ct    = 0.2  # weight of distance cue-target
+    w_tp    = 0.2  # weight of distance target-pocket
+
     for c in candidates:
-        angle_score = c['angle'] / math.pi  # normalized 0,1
+        angle_score = c['angle'] / math.pi  # normalized 0..1
         ct_score = 0.0 if ct_range < 1e-6 else (c['dist_ct'] - min_ct) / ct_range
         tp_score = 0.0 if tp_range < 1e-6 else (c['dist_tp'] - min_tp) / tp_range
 
-        score = (w_angle * angle_score) + (w_ct * ct_score) + (w_tp * tp_score)
+        score = (w_angle * angle_score
+                 + w_ct * ct_score
+                 + w_tp * tp_score
+                 + c['bank_penalty'])
 
         if score < best_score:
-            best_score = score
-            best_ball = c['ball']
-            best_cue_path, best_target_path = calculate_path(cue_cm, c['bpos'], c['pocket'])
+            best_score     = score
+            best_ball      = c['ball']
+            best_cue_path  = c['cue_path']
+            best_target_path = c['target_path']
 
     return best_ball, best_cue_path, best_target_path
 
@@ -172,36 +255,44 @@ def suggest_best_shot(
 def _choose_best_pocket(
     target_cm:  Tuple[float, float],
     shot_dir:   Tuple[float, float],
+    obstacles:  Optional[List[Tuple[float, float]]] = None,
 ) -> Tuple[float, float]:
     """
-    Pick the pocket whose direction from target_cm best aligns with shot_dir.
+    Pick the pocket whose direction from target_cm best aligns with shot_dir,
+    preferring pockets whose target→pocket path is not obstructed.
 
     Parameters
     ----------
     target_cm : (x, y) of the target ball in table cm.
     shot_dir  : (dx, dy) direction vector from cue to target (need not be unit).
+    obstacles : optional list of (x, y) ball centres that may block the path.
+                When provided, unblocked pockets are preferred; all pockets are
+                still considered as a fallback if all paths are blocked.
 
     Returns
     -------
     (x, y) of the best matching pocket in table cm.
 
-    Algorithm (extracted and converted to cm from gui/app.py _choose_pocket(),
-    lines 1014-1050):
-      For each pocket compute the angle between shot_dir and the vector
-      (target â†’ pocket). Return the pocket with the minimum angle.
+    Algorithm:
+      For each pocket compute the angle between shot_dir and (target -> pocket).
+      Among unblocked pockets, return the one with the minimum angle.
+      If all pockets are blocked (or no obstacle list given), fall back to the
+      globally best-aligned pocket regardless of blocking.
     """
     tx, ty = target_cm
     sx, sy = shot_dir
     shot_norm = math.hypot(sx, sy)
     if shot_norm < 1e-6:
-        # Degenerate: cue and target coincide â€” return nearest pocket
+        # Degenerate: cue and target coincide — return nearest pocket
         return min(
             POCKET_POSITIONS_CM,
             key=lambda p: (p[0] - tx) ** 2 + (p[1] - ty) ** 2,
         )
 
-    best_pocket = POCKET_POSITIONS_CM[0]
-    best_angle  = float('inf')
+    best_pocket       = POCKET_POSITIONS_CM[0]
+    best_angle        = float('inf')
+    best_clear_pocket = None
+    best_clear_angle  = float('inf')
 
     for pocket in POCKET_POSITIONS_CM:
         px, py = pocket
@@ -213,8 +304,19 @@ def _choose_best_pocket(
         cosang = (sx * tdx + sy * tdy) / (shot_norm * pocket_norm)
         cosang = max(-1.0, min(1.0, cosang))
         angle  = math.acos(cosang)
+
         if angle < best_angle:
             best_angle  = angle
             best_pocket = pocket
+
+        if obstacles is not None:
+            if not is_path_blocked(target_cm, pocket, obstacles):
+                if angle < best_clear_angle:
+                    best_clear_angle  = angle
+                    best_clear_pocket = pocket
+
+    # Prefer a clear pocket when one exists
+    if best_clear_pocket is not None:
+        return best_clear_pocket
     return best_pocket
 

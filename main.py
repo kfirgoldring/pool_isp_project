@@ -395,7 +395,7 @@ def _run_tick(window, game: GolfGame, tracker: _BallTracker) -> None:
                 ]
                 if remaining_dicts:
                     best_ball, cue_path, target_path = suggest_best_shot(
-                        cue_cm, remaining_dicts
+                        cue_cm, remaining_dicts, all_balls=balls
                     )
                     if best_ball is not None:
                         game.select_target(best_ball['color'])
