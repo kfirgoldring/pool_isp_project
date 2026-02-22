@@ -407,9 +407,7 @@ def detect_balls(
         max_r = 40
         min_dist = 20
     min_area_px = cfg.min_area_ratio * table_area_px
-#contour-based detection on diff mask
     contours, _ = cv2.findContours(diff_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    cv2.drawContours(diff_mask, contours, -1, (0, 0, 255), 2)
     detections: List[BallDetection] = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
