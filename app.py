@@ -2,7 +2,7 @@
 Billiards Assistance System — GUI / Rendering Module
 =====================================================
 PyQt5 application with three-page flow:
-  Page 0 — SetupPage:       hardware selection (camera index, projector yes/no)
+  Page 0 — SetupPage:       hardware selection (camera index, camera yes/no)
   Page 1 — CalibrationPage: live camera preview, corner clicking, auto-detect
   Page 2 — Main view:       camera feed with ball overlays and trajectory lines
 
@@ -12,7 +12,7 @@ Public API used by main.py:
   BilliardsApp(tick_callback)   — main window; tick_callback called every 33 ms
   app.grab_frame()              — latest raw BGR camera frame
   app.consume_pending_clicks()  — (x_cm, y_cm) clicks since last call
-  app.render(frame, balls, ...) — draw overlays and push to screen/projector
+  app.render(frame, balls, ...) — draw overlays and push to screen
   app.cam_H                     — camera→table homography (set by CalibrationPage)
   app.table_corners             — 4 camera-pixel corner points (set by CalibrationPage)
   app.selected_pocket_cm        — manually selected pocket in table cm (or None)
@@ -25,8 +25,6 @@ Coordinate system rule:
 import sys
 import os
 import pathlib
-import shutil
-import tempfile
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -60,15 +58,11 @@ from PyQt5.QtGui import QImage, QPixmap, QFont, QIcon
 
 _CACHE_DIR  = pathlib.Path.home() / '.billiards_assistant'
 _CAM_CACHE  = str(_CACHE_DIR / 'camera_homography.npy')
-_PROJ_CACHE = str(_CACHE_DIR / 'projector_homography.npy')
 _REF_CACHE  = str(_CACHE_DIR / 'ref.jpeg')
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Constants
 # ═════════════════════════════════════════════════════════════════════════════
-
-MODE_SCREEN     = 'screen'
-MODE_PROJECTION = 'projection'
 
 # Top-down (bird's-eye) view — 8 px/cm → 122×61 cm → 976×488 px canvas
 TABLE_DISPLAY_SCALE  = 8
@@ -323,68 +317,15 @@ class ClickableLabel(QLabel):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# ProjectorWindow — fullscreen overlay on the projector / second monitor
-# ═════════════════════════════════════════════════════════════════════════════
-
-class ProjectorWindow(QWidget):
-    """Overlay window for the projector. Goes fullscreen on the second monitor."""
-
-    def __init__(self, close_callback=None):
-        super().__init__()
-        self._close_callback = close_callback
-        self.setWindowTitle('OptiCue — Projector Output  [Esc = back]')
-        self.setStyleSheet('background-color: black;')
-        self._label = QLabel(self)
-        self._label.setAlignment(Qt.AlignCenter)
-        self._label.setStyleSheet('background-color: black;')
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addWidget(self._label)
-
-    def update_frame(self, frame: np.ndarray):
-        pixmap = _bgr_to_pixmap(frame)
-        self._label.setPixmap(
-            pixmap.scaled(self.width(), self.height(),
-                          Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-        )
-
-    def show_on_best_screen(self):
-        screens = QApplication.screens()
-        if len(screens) >= 2:
-            geom = screens[1].geometry()
-            self.move(geom.left(), geom.top())
-            self.resize(geom.width(), geom.height())
-            self.showFullScreen()
-        else:
-            self.showNormal()
-            self.resize(800, 500)
-            self.move(100, 100)
-
-    def keyPressEvent(self, event):
-        if event.key() in (Qt.Key_Escape, Qt.Key_M, Qt.Key_Q):
-            self._return_to_screen()
-        else:
-            super().keyPressEvent(event)
-
-    def closeEvent(self, event):
-        self._return_to_screen()
-        event.accept()
-
-    def _return_to_screen(self):
-        if self._close_callback is not None:
-            self._close_callback()
-
-
-# ═════════════════════════════════════════════════════════════════════════════
 # SetupPage — hardware selection (page 0)
 # ═════════════════════════════════════════════════════════════════════════════
 
 class SetupPage(QWidget):
     """
     Hardware configuration screen shown on startup.
-    Emits start_requested(camera_index, has_camera, has_projector).
+    Emits start_requested(camera_index, has_camera).
     """
-    start_requested = pyqtSignal(int, bool, bool)
+    start_requested = pyqtSignal(int, bool)
 
     def __init__(self):
         super().__init__()
@@ -451,13 +392,6 @@ class SetupPage(QWidget):
         cam_layout.addLayout(idx_row)
         outer.addWidget(cam_group)
 
-        proj_group = QGroupBox('Projector')
-        proj_layout = QVBoxLayout(proj_group)
-        self._chk_projector = QCheckBox('Projector connected')
-        self._chk_projector.setChecked(False)
-        proj_layout.addWidget(self._chk_projector)
-        outer.addWidget(proj_group)
-
         self._lbl_mock = QLabel('(No hardware selected — will run in mock/demo mode)')
         self._lbl_mock.setAlignment(Qt.AlignCenter)
         self._lbl_mock.setStyleSheet("""
@@ -491,14 +425,12 @@ class SetupPage(QWidget):
 
     def _on_camera_toggled(self, checked: bool):
         self._spin_camera.setEnabled(checked)
-        has_any = checked or self._chk_projector.isChecked()
-        self._lbl_mock.setVisible(not checked and not self._chk_projector.isChecked())
+        self._lbl_mock.setVisible(not checked)
 
     def _on_start(self):
         self.start_requested.emit(
             self._spin_camera.value(),
             self._chk_camera.isChecked(),
-            self._chk_projector.isChecked(),
         )
 
 
@@ -1335,19 +1267,16 @@ class BilliardsApp(QMainWindow):
         # ── Injected orchestration callback ──────────────────────────────────
         self._tick_callback = tick_callback
 
-        # ── Hardware / mode ──────────────────────────────────────────────────
+        # ── Hardware ─────────────────────────────────────────────────────────
         self.camera_index    : int  = config.CAMERA_INDEX
         self.use_mock        : bool = False
-        self._wants_projector: bool = False
 
         # ── Rendering state ──────────────────────────────────────────────────
-        self.mode      = MODE_SCREEN
         self.paused    = False
         self._raw_view = False
 
         # ── Calibration homographies (in-memory only) ────────────────────────
         self.cam_H      : Optional[np.ndarray] = None   # camera px → table cm
-        self.proj_H_inv : Optional[np.ndarray] = None   # table cm → projector px
 
         # ── Table corners (camera px; stored during calibration) ─────────────
         self._table_corners: Optional[np.ndarray] = None   # shape (4, 2) float32
@@ -1367,9 +1296,6 @@ class BilliardsApp(QMainWindow):
         self.frozen_frame  : Optional[np.ndarray] = None
         self._cap          = None
         self._timer        = None
-
-        # ── Projector window ─────────────────────────────────────────────────
-        self.proj_window: Optional[ProjectorWindow] = None
 
         # ── Game-state cache for status panel (set by render()) ──────────────
         self._last_stroke_count : int       = 0
@@ -1426,7 +1352,6 @@ class BilliardsApp(QMainWindow):
     ) -> None:
         """
         Draw overlays on the frame and push to the camera label.
-        Also updates the projector window if active.
 
         Parameters
         ----------
@@ -1529,13 +1454,6 @@ class BilliardsApp(QMainWindow):
                 Qt.KeepAspectRatio, Qt.SmoothTransformation
             )
         )
-
-        # ── Update projector window ───────────────────────────────────────────
-        if self.proj_window is not None and self.proj_window.isVisible():
-            proj_canvas = self._render_projection_from_cm(
-                balls, cue_path, target_path, selected_color
-            )
-            self.proj_window.update_frame(proj_canvas)
 
         # ── Update status panel ───────────────────────────────────────────────
         self._update_status_panel()
@@ -1760,7 +1678,6 @@ class BilliardsApp(QMainWindow):
         self.btn_start_game  = QPushButton('Start Game')
         self.btn_start_over  = QPushButton('Start Over')
         self.btn_capture     = QPushButton('Capture')
-        self.btn_mode        = QPushButton('Switch to Projection')
         self.btn_recalib     = QPushButton('Re-calibrate')
         self.btn_homography  = QPushButton('Disable Homography')
 
@@ -1769,27 +1686,23 @@ class BilliardsApp(QMainWindow):
         self.btn_start_over.setEnabled(False)
         self.btn_start_over.setStyleSheet(_BTN_DISABLED_SS)
         self.btn_capture.setStyleSheet(_BTN_GHOST_SS)
-        self.btn_mode.setEnabled(False)
-        self.btn_mode.setStyleSheet(_BTN_GHOST_SS)
         self.btn_recalib.setStyleSheet(_BTN_GHOST_SS)
         self.btn_homography.setStyleSheet(_BTN_GHOST_SS)
 
         self.btn_start_game.setToolTip('Validate 5 balls and start a new round')
         self.btn_start_over.setToolTip('Reset strokes and remaining balls to start a new round')
         self.btn_capture.setToolTip('Save current frame to disk (Space)')
-        self.btn_mode.setToolTip('Toggle Screen / Projection (M)')
         self.btn_recalib.setToolTip('Go back to calibration page')
         self.btn_homography.setToolTip('Toggle raw / top-down view')
 
         self.btn_start_game.clicked.connect(self._on_start_game)
         self.btn_start_over.clicked.connect(self._on_start_over)
         self.btn_capture.clicked.connect(self._on_capture)
-        self.btn_mode.clicked.connect(self._on_toggle_mode)
         self.btn_recalib.clicked.connect(self._on_recalibrate)
         self.btn_homography.clicked.connect(self._on_toggle_homography)
 
         for btn in (self.btn_start_game, self.btn_start_over, self.btn_capture,
-                    self.btn_mode, self.btn_recalib, self.btn_homography):
+                    self.btn_recalib, self.btn_homography):
             sb.addWidget(btn)
 
         sb.addStretch()
@@ -1835,10 +1748,9 @@ class BilliardsApp(QMainWindow):
     # Pipeline flow — setup → calibration → main
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _on_setup_done(self, camera_index: int, has_camera: bool, has_projector: bool):
-        self.camera_index     = camera_index
-        self.use_mock         = not has_camera
-        self._wants_projector = has_projector
+    def _on_setup_done(self, camera_index: int, has_camera: bool):
+        self.camera_index = camera_index
+        self.use_mock     = not has_camera
 
         if not has_camera:
             # Mock mode — skip calibration entirely
@@ -1879,7 +1791,7 @@ class BilliardsApp(QMainWindow):
         self._start_camera()    # validates cap; no-op if mock
         self._start_timer()
         calib_str = 'OK' if self.cam_H is not None else 'none'
-        self.lbl_mode_calib.setText(f'Screen  \u00b7  Calib: {calib_str}')
+        self.lbl_mode_calib.setText(f'Calib: {calib_str}')
         self.statusBar().showMessage('Ready — click a ball to select a target.')
 
     def _on_calibration_done(self, H):
@@ -1905,11 +1817,6 @@ class BilliardsApp(QMainWindow):
             self.ref_path = None
             print('[GUI] No reference frame available — ball detection may be degraded.')
 
-        if self._wants_projector and self.cam_H is not None:
-            self.statusBar().showMessage('Running projector calibration…')
-            QApplication.processEvents()
-            self._calibrate_projector_in_memory()
-
         # Always route to PlayerRegistrationPage after calibration
         self._stack.setCurrentIndex(2)   # → PlayerRegistrationPage
         self.setMinimumSize(500, 380)
@@ -1918,9 +1825,8 @@ class BilliardsApp(QMainWindow):
     def _on_recalibrate(self):
         if self._timer is not None:
             self._timer.stop()
-        self.cam_H      = None
-        self.proj_H_inv = None
-        self.ref_path   = None
+        self.cam_H          = None
+        self.ref_path       = None
         self._table_corners = None
 
         if self._cap is None or not self._cap.isOpened():
@@ -1960,9 +1866,8 @@ class BilliardsApp(QMainWindow):
         if self._timer is not None:
             self._timer.stop()
             self._timer = None
-        self.cam_H      = None
-        self.proj_H_inv = None
-        self.ref_path   = None
+        self.cam_H          = None
+        self.ref_path       = None
         self._table_corners = None
 
         if self._cap is None or not self._cap.isOpened():
@@ -1976,32 +1881,6 @@ class BilliardsApp(QMainWindow):
             'Re-calibrating — place 4 corners and click Accept.'
         )
         self._calib_page.start_camera(self._cap)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # Projector calibration (in-memory, temp file hidden from user)
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _calibrate_projector_in_memory(self):
-        try:
-            import billiards_calibration_merged as bcm
-            tmp_dir  = tempfile.mkdtemp()
-            tmp_path = os.path.join(tmp_dir, 'camera_homography.npy')
-            np.save(tmp_path, self.cam_H)
-            original = bcm.CAMERA_CALIB_FILE
-            bcm.CAMERA_CALIB_FILE = tmp_path
-            try:
-                proj_H = bcm.ProjectorCalibrator().calibrate(self.camera_index)
-            finally:
-                bcm.CAMERA_CALIB_FILE = original
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-
-            if proj_H is not None:
-                self.proj_H_inv = np.linalg.inv(proj_H).astype(np.float32)
-                _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-                np.save(_PROJ_CACHE, proj_H)
-                print(f'[GUI] Projector homography cached: {_PROJ_CACHE}')
-        except Exception as exc:
-            print(f'[GUI] Projector calibration error: {exc}')
 
     # ─────────────────────────────────────────────────────────────────────────
     # Camera setup
@@ -2147,75 +2026,6 @@ class BilliardsApp(QMainWindow):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2, cv2.LINE_AA)
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Projection-mode rendering  (black canvas in projector coordinates)
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _render_projection_from_cm(
-        self,
-        balls:         List[Dict],
-        cue_path:      List[Tuple[float, float]],
-        target_path:   List[Tuple[float, float]],
-        selected_color: Optional[str],
-    ) -> np.ndarray:
-        """Build a 1920×1080 black canvas with overlays in projector coordinates.
-        All input paths are in table cm; balls have 'center_cm'."""
-        canvas = np.zeros(
-            (config.PROJECTOR_HEIGHT, config.PROJECTOR_WIDTH, 3), dtype=np.uint8
-        )
-        if self.proj_H_inv is None:
-            cv2.putText(canvas, 'NO PROJECTOR CALIBRATION',
-                        (300, 540), cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 0, 220), 4)
-            return canvas
-
-        def to_proj(pt_cm: Tuple[float, float]) -> Optional[Tuple[int, int]]:
-            return self._table_to_projector(pt_cm)
-
-        # Target path
-        if len(target_path) >= 2:
-            tp_proj = [to_proj(p) for p in target_path]
-            tp_proj = [p for p in tp_proj if p]
-            if len(tp_proj) >= 2:
-                self._draw_trajectory(canvas, tp_proj, thickness=3,
-                                      color=COLOR_PATH_2)
-
-        # Cue path (extended backwards)
-        if len(cue_path) >= 2:
-            cp_proj = [to_proj(p) for p in cue_path]
-            cp_proj = [p for p in cp_proj if p]
-            if len(cp_proj) >= 2:
-                ext = self._extend_path_backward(cp_proj)
-                self._draw_trajectory(canvas, ext, thickness=3,
-                                      color=COLOR_PATH)
-
-        # Ghost-ball outline
-        if len(cue_path) >= 2 and selected_color is not None:
-            ghost_proj = to_proj(cue_path[-1])
-            if ghost_proj:
-                cv2.circle(canvas, ghost_proj, 22, COLOR_PATH, 2, cv2.LINE_AA)
-
-        # Pockets
-        for pocket in POCKET_POSITIONS_TABLE:
-            proj_pt = to_proj(pocket['pos'])
-            if proj_pt:
-                is_sel = (pocket['name'] == self._selected_pocket_name)
-                self._draw_pocket(canvas, proj_pt, selected=is_sel, radius=18)
-
-        # Balls
-        for ball in balls:
-            cm = ball.get('center_cm')
-            if cm is None:
-                continue
-            proj_pt = to_proj(cm)
-            if proj_pt is None:
-                continue
-            self._draw_ball(canvas, proj_pt, 22,
-                            ball.get('color', 'gray'),
-                            ball.get('is_cue', False),
-                            ball.get('color') == selected_color and not ball.get('is_cue'))
-
-        return canvas
-
-    # ─────────────────────────────────────────────────────────────────────────
     # Drawing primitives
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -2301,7 +2111,7 @@ class BilliardsApp(QMainWindow):
         return cv2.warpPerspective(frame, S @ self.cam_H, (w, h))
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Coordinate transforms (camera ↔ table ↔ projector)
+    # Coordinate transforms (camera ↔ table)
     # ─────────────────────────────────────────────────────────────────────────
 
     def _camera_to_table(self, pt) -> Optional[Tuple[float, float]]:
@@ -2310,13 +2120,6 @@ class BilliardsApp(QMainWindow):
         arr = np.array([[[float(pt[0]), float(pt[1])]]], dtype=np.float32)
         res = cv2.perspectiveTransform(arr, self.cam_H)
         return (float(res[0][0][0]), float(res[0][0][1]))
-
-    def _table_to_projector(self, pt) -> Optional[Tuple[int, int]]:
-        if self.proj_H_inv is None:
-            return None
-        arr = np.array([[[float(pt[0]), float(pt[1])]]], dtype=np.float32)
-        res = cv2.perspectiveTransform(arr, self.proj_H_inv)
-        return (int(res[0][0][0]), int(res[0][0][1]))
 
     def _table_to_camera(self, pt) -> Optional[Tuple[int, int]]:
         if self.cam_H is None:
@@ -2474,26 +2277,6 @@ class BilliardsApp(QMainWindow):
         self._selected_pocket_cm   = None
         self.statusBar().showMessage('Pocket selection cleared — using auto-selection.')
 
-    def _on_toggle_mode(self):
-        if self.mode == MODE_SCREEN:
-            self.mode = MODE_PROJECTION
-            if self.proj_window is None:
-                self.proj_window = ProjectorWindow(close_callback=self._on_toggle_mode)
-            self.proj_window.show_on_best_screen()
-            screens = QApplication.screens()
-            msg = ('Projection mode — overlay on projector. Press Esc to return.'
-                   if len(screens) >= 2 else
-                   'Projection mode — no second monitor; showing in separate window.')
-            self.statusBar().showMessage(msg)
-        else:
-            self.mode = MODE_SCREEN
-            if self.proj_window is not None:
-                self.proj_window._close_callback = None
-                self.proj_window.hide()
-                self.proj_window._close_callback = self._on_toggle_mode
-            self.statusBar().showMessage('Screen mode.')
-        self._update_status_panel()
-
     def _on_toggle_homography(self):
         """Toggle between top-down (homography) and raw camera view."""
         self._raw_view = not self._raw_view
@@ -2506,9 +2289,8 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _update_status_panel(self):
-        mode_str  = 'Screen' if self.mode == MODE_SCREEN else 'Projection'
         calib_str = 'Calib: OK' if self.cam_H is not None else 'Calib: none'
-        self.lbl_mode_calib.setText(f'{mode_str}  \u00b7  {calib_str}')
+        self.lbl_mode_calib.setText(calib_str)
 
         game_str = self._last_game_state.replace('_', ' ').title()
         self.lbl_game_status.setText(f'Game: {game_str}')
@@ -2576,17 +2358,6 @@ class BilliardsApp(QMainWindow):
             self.btn_start_over.setEnabled(False)
             self.btn_start_over.setStyleSheet(_BTN_DISABLED_SS)
 
-        # btn_mode: active (orange) when projection on, ghost when screen mode
-        if self.mode == MODE_PROJECTION:
-            self.btn_mode.setText('Back to Screen')
-            self.btn_mode.setEnabled(True)
-            self.btn_mode.setStyleSheet(_BTN_ACCENT_SS)
-        else:
-            self.btn_mode.setText('Switch to Projection')
-            has_proj = getattr(self, '_wants_projector', False)
-            self.btn_mode.setEnabled(has_proj)
-            self.btn_mode.setStyleSheet(_BTN_GHOST_SS)
-
         if self._last_game_state == 'GAME_OVER':
             self.lbl_game_msg.setText(
                 f'Game Over! All balls pocketed in {self._last_stroke_count} strokes.'
@@ -2620,8 +2391,6 @@ class BilliardsApp(QMainWindow):
                 self._on_capture()
             elif key == Qt.Key_R:
                 self._on_reset()
-            elif key == Qt.Key_M:
-                self._on_toggle_mode()
             else:
                 super().keyPressEvent(event)
         else:
@@ -2640,8 +2409,6 @@ class BilliardsApp(QMainWindow):
         if self._cap is not None:
             self._cap.release()
             self._cap = None
-        if self.proj_window is not None:
-            self.proj_window.close()
         event.accept()
 
 
