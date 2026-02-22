@@ -369,14 +369,31 @@ def _load_opticue_fonts(app) -> None:
 def main() -> None:
     try:
         from PyQt5.QtWidgets import QApplication
+        from PyQt5.QtCore import Qt
     except ImportError:
         print('ERROR: PyQt5 is required. Install with:  pip install PyQt5')
         sys.exit(1)
 
     from app import BilliardsApp
 
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app_qt = QApplication(sys.argv)
     app_qt.setApplicationName('Billiards Golf Game')
+
+    # Load custom fonts before window creation so they are available in the stylesheet
+    _load_opticue_fonts(app_qt)
+
+    # Gentle DPI-based font scaling: only scales font-size px values in the global
+    # stylesheet, leaving all widget geometry unchanged so layouts cannot overflow.
+    import re, app as _app_mod
+    _screen_dpi = app_qt.primaryScreen().logicalDotsPerInch()
+    _font_scale = min(_screen_dpi / 96.0, 1.5)   # cap at 1.5× to prevent overflow
+    if _font_scale > 1.05:
+        _app_mod._APP_STYLE = re.sub(
+            r'font-size:\s*(\d+)px',
+            lambda m: f'font-size: {round(int(m.group(1)) * _font_scale)}px',
+            _app_mod._APP_STYLE,
+        )
 
     COLORED_BALLS = ['orange', 'yellow', 'blue', 'bordeaux']
     game    = GolfGame(COLORED_BALLS)
@@ -395,7 +412,6 @@ def main() -> None:
     window._last_balls = []
     _ctx['window'] = window
 
-    _load_opticue_fonts(app_qt)
     window.show()
 
     sys.exit(app_qt.exec_())

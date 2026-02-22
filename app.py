@@ -47,9 +47,9 @@ except (ImportError, AttributeError):
 # ── PyQt5 imports ─────────────────────────────────────────────────────────────
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
-    QVBoxLayout, QHBoxLayout, QFrame, QSizePolicy, QStatusBar,
+    QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, QSizePolicy, QStatusBar,
     QStackedWidget, QCheckBox, QSpinBox, QGroupBox, QLineEdit,
-    QProgressBar,
+    QProgressBar, QScrollArea,
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap, QFont, QIcon
@@ -139,51 +139,52 @@ QMainWindow, QWidget {
 
 QLabel {
     color: #2a2520;
-    font-family: 'DM Sans', 'Segoe UI', sans-serif;
+    font-family: 'Lora', Georgia, serif;
     font-size: 13px;
 }
 
 QPushButton {
     background-color: #1c3a26;
-    color: #f4efe4;
-    border: none;
-    border-radius: 2px;
-    padding: 9px 14px;
-    font-size: 14px;
-    font-family: 'DM Sans', 'Segoe UI', sans-serif;
-    min-height: 36px;
-    text-align: left;
+    color:            #f4efe4;
+    border:           none;
+    border-radius:    2px;
+    padding:          9px 14px;
+    font-family:      'DM Sans', 'Segoe UI', sans-serif;
+    font-size:        13px;
+    font-weight:      500;
+    min-height:       34px;
+    text-align:       left;
 }
-QPushButton:hover    { background-color: #2a5c38; }
-QPushButton:pressed  { background-color: #d95f1a; }
+QPushButton:hover   { background-color: #2a5c38; }
+QPushButton:pressed { background-color: #d95f1a; }
 QPushButton:disabled {
     background-color: #ece6d8;
-    color: #b0a48c;
-    border: 1px solid #ddd4bc;
+    color:            #b0a48c;
+    border:           1px solid #ddd4bc;
 }
-
 QPushButton#btn_accent {
     background-color: #d95f1a;
-    color: #f4efe4;
+    color:            #f4efe4;
+    border:           none;
 }
 QPushButton#btn_accent:hover   { background-color: #c04a10; }
 QPushButton#btn_accent:pressed { background-color: #a03a08; }
-
 QPushButton#btn_ghost {
     background-color: transparent;
-    color: #2a2520;
-    border: 1px solid #c4b898;
+    color:            #2a2520;
+    border:           1px solid #c4b898;
 }
-QPushButton#btn_ghost:hover  { border-color: #1c3a26; color: #1c3a26; }
-
-QPushButton#btn_mode_active {
+QPushButton#btn_ghost:hover   { border-color: #1c3a26; color: #1c3a26; }
+QPushButton#btn_ghost:pressed { background-color: #ece6d8; }
+QPushButton#btn_active {
     background-color: #d95f1a;
-    color: #f4efe4;
-    border: none;
+    color:            #f4efe4;
+    border:           none;
 }
+QPushButton#btn_active:hover { background-color: #c04a10; }
 
 QGroupBox {
-    background-color: transparent;
+    background-color: #f4efe4;
     border: 1px solid #c4b898;
     border-radius: 2px;
     margin-top: 12px;
@@ -242,6 +243,20 @@ QStatusBar {
     font-family: 'DM Sans', 'Segoe UI', sans-serif;
     border-top: 1px solid #c4b898;
 }
+
+QScrollArea { background-color: transparent; border: none; }
+QScrollBar:vertical {
+    background: #ece6d8;
+    width: 6px;
+    border-radius: 3px;
+    margin: 0;
+}
+QScrollBar::handle:vertical {
+    background: #c4b898;
+    border-radius: 3px;
+    min-height: 20px;
+}
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 """
 
 
@@ -554,7 +569,20 @@ class CalibrationPage(QWidget):
         sidebar = QWidget()
         sidebar.setFixedWidth(260)
         sidebar.setStyleSheet('background-color: #ece6d8;')
-        sb = QVBoxLayout(sidebar)
+        outer_sb_layout = QVBoxLayout(sidebar)
+        outer_sb_layout.setContentsMargins(0, 0, 0, 0)
+        outer_sb_layout.setSpacing(0)
+
+        calib_scroll = QScrollArea()
+        calib_scroll.setFrameShape(QFrame.NoFrame)
+        calib_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        calib_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        calib_scroll.setWidgetResizable(True)
+        calib_scroll.setStyleSheet('background-color: #ece6d8;')
+
+        calib_content = QWidget()
+        calib_content.setStyleSheet('background-color: #ece6d8;')
+        sb = QVBoxLayout(calib_content)
         sb.setContentsMargins(16, 16, 16, 16)
         sb.setSpacing(10)
 
@@ -581,17 +609,52 @@ class CalibrationPage(QWidget):
         divider.setStyleSheet('background-color: #c4b898; max-height: 1px; border: none;')
         sb.addWidget(divider)
 
-        # 4 corner rows (dynamic rich-text labels)
-        self._corner_rows = []
-        for i in range(4):
-            row_lbl = QLabel()
-            row_lbl.setTextFormat(Qt.RichText)
-            row_lbl.setMinimumHeight(28)
-            row_lbl.setStyleSheet('padding: 2px 0;')
-            self._corner_rows.append(row_lbl)
-            sb.addWidget(row_lbl)
+        # ── 2×2 corner cross ──────────────────────────────────────────────────
+        # Corners are placed spatially: TL=0 / TR=1 (top row), BL=3 / BR=2 (bottom row)
+        # A single vsep widget spans all 3 rows so the vertical line is continuous.
+        # The horizontal bar is split into left/right halves meeting the vsep at centre.
+        def _make_hsep_half():
+            f = QFrame()
+            f.setFrameShape(QFrame.HLine)
+            f.setFixedHeight(1)
+            f.setStyleSheet('background-color: #d4b896; border: none;')
+            return f
 
-        # Status badge
+        cross = QWidget()
+        cross.setStyleSheet('background-color: transparent;')
+        cross_grid = QGridLayout(cross)
+        cross_grid.setContentsMargins(0, 0, 0, 0)
+        cross_grid.setSpacing(0)
+
+        self._corner_rows = []
+        for _ in range(4):
+            lbl = QLabel()
+            lbl.setTextFormat(Qt.RichText)
+            lbl.setMinimumHeight(28)
+            lbl.setStyleSheet('padding: 3px 6px; background: transparent; border: none;')
+            self._corner_rows.append(lbl)
+
+        # Single vertical separator spanning all 3 rows (always at grid centre)
+        vsep = QFrame()
+        vsep.setFrameShape(QFrame.VLine)
+        vsep.setFixedWidth(1)
+        vsep.setStyleSheet('background-color: #d4b896; border: none;')
+
+        cross_grid.addWidget(self._corner_rows[0], 0, 0)      # TL
+        cross_grid.addWidget(vsep,                 0, 1, 3, 1) # vertical line spans rows 0-2
+        cross_grid.addWidget(self._corner_rows[1], 0, 2)      # TR
+        cross_grid.addWidget(_make_hsep_half(),    1, 0)      # H-sep left half
+        # cell (1, 1) is occupied by vsep row-span — no widget needed
+        cross_grid.addWidget(_make_hsep_half(),    1, 2)      # H-sep right half
+        cross_grid.addWidget(self._corner_rows[3], 2, 0)      # BL
+        cross_grid.addWidget(self._corner_rows[2], 2, 2)      # BR
+
+        cross_grid.setColumnStretch(0, 1)
+        cross_grid.setColumnStretch(2, 1)
+
+        sb.addWidget(cross)
+
+        # Status badge (count label below the cross)
         self._lbl_corner_status = QLabel('0 of 4 corners placed')
         self._lbl_corner_status.setWordWrap(True)
         self._lbl_corner_status.setStyleSheet("""
@@ -612,14 +675,33 @@ class CalibrationPage(QWidget):
 
         sb.addStretch()
 
+        # Inline stylesheet constants — used here and in _update_corner_label.
+        # Needed because intermediate container widgets use unscoped setStyleSheet()
+        # which Qt treats as QWidget { ... }, cascading to all descendants and
+        # overriding the global _APP_STYLE QPushButton rules.
+        self._BTN_PRIMARY_SS = (
+            'QPushButton { background-color: #1c3a26; color: #f4efe4; border: none; }'
+            'QPushButton:hover { background-color: #2a5c38; }'
+            'QPushButton:pressed { background-color: #d95f1a; }'
+        )
+        self._BTN_ACCENT_SS = (
+            'QPushButton { background-color: #d95f1a; color: #f4efe4; border: none; }'
+            'QPushButton:hover { background-color: #c04a10; }'
+            'QPushButton:pressed { background-color: #a03a08; }'
+        )
+        self._BTN_DISABLED_SS = (
+            'QPushButton { background-color: #ece6d8; color: #b0a48c; border: 1px solid #ddd4bc; }'
+        )
+
         self._btn_auto   = QPushButton('Auto-detect')
         self._btn_clear  = QPushButton('Clear Corners')
         self._btn_accept = QPushButton('Confirm Calibration')
 
+        self._btn_auto.setStyleSheet(self._BTN_PRIMARY_SS)
+        self._btn_clear.setEnabled(False)
+        self._btn_clear.setStyleSheet(self._BTN_DISABLED_SS)
         self._btn_accept.setEnabled(False)
-        self._btn_accept.setObjectName('btn_accent')
-        self._btn_clear.setObjectName('btn_ghost')
-        self._btn_auto.setEnabled(SCENE_AVAILABLE)
+        self._btn_accept.setStyleSheet(self._BTN_DISABLED_SS)
 
         self._btn_auto.clicked.connect(self._on_auto_detect)
         self._btn_clear.clicked.connect(self._on_clear)
@@ -627,6 +709,9 @@ class CalibrationPage(QWidget):
 
         for btn in (self._btn_auto, self._btn_clear, self._btn_accept):
             sb.addWidget(btn)
+
+        calib_scroll.setWidget(calib_content)
+        outer_sb_layout.addWidget(calib_scroll)
 
         root.addWidget(sidebar)
 
@@ -760,7 +845,22 @@ class CalibrationPage(QWidget):
                     f'{name}…</span>'
                 )
         self._lbl_corner_status.setText(f'{n} of 4 corners placed')
-        self._btn_accept.setEnabled(n == 4)
+
+        # Clear Corners: disabled until ≥1 corner placed, then Accent
+        if n > 0:
+            self._btn_clear.setEnabled(True)
+            self._btn_clear.setStyleSheet(self._BTN_ACCENT_SS)
+        else:
+            self._btn_clear.setEnabled(False)
+            self._btn_clear.setStyleSheet(self._BTN_DISABLED_SS)
+
+        # Confirm Calibration: disabled until exactly 4 corners → Primary
+        if n == 4:
+            self._btn_accept.setEnabled(True)
+            self._btn_accept.setStyleSheet(self._BTN_PRIMARY_SS)
+        else:
+            self._btn_accept.setEnabled(False)
+            self._btn_accept.setStyleSheet(self._BTN_DISABLED_SS)
 
     def _on_clear(self):
         self._corners = []
@@ -1027,21 +1127,14 @@ class PlayerRegistrationPage(QWidget):
 
         outer.addStretch()
 
-        btn = QPushButton('Continue  →')
-        btn.setMinimumHeight(46)
-        btn.setStyleSheet("""
-            background-color: #1c3a26;
-            color: #f4efe4;
-            border: none;
-            border-radius: 2px;
-            font-family: 'DM Sans', 'Segoe UI', sans-serif;
-            font-size: 15px;
-            font-weight: 500;
-            padding: 12px;
-            text-align: center;
-        """)
-        btn.clicked.connect(self._on_continue)
-        outer.addWidget(btn)
+        self._btn_continue = QPushButton('Continue  →')
+        self._btn_continue.setMinimumHeight(46)
+        self._btn_continue.setEnabled(False)
+        self._btn_continue.clicked.connect(self._on_continue)
+        self._edit.textChanged.connect(
+            lambda txt: self._btn_continue.setEnabled(bool(txt.strip()))
+        )
+        outer.addWidget(self._btn_continue)
 
     def showEvent(self, event):
         """Clear the name field whenever the page is shown."""
@@ -1049,6 +1142,7 @@ class PlayerRegistrationPage(QWidget):
         self._edit.clear()
         self._lbl_error.setVisible(False)
         self._edit.setFocus()
+        self._btn_continue.setEnabled(False)
 
     def _on_continue(self):
         name = self._edit.text().strip()
@@ -1118,16 +1212,16 @@ class LeaderboardPage(QWidget):
         btn_row.setSpacing(8)
 
         btn_play = QPushButton('Play Again')
-        btn_play.setObjectName('btn_accent')
         btn_play.setMinimumHeight(42)
         btn_play.clicked.connect(self.play_again.emit)
 
         btn_recalib = QPushButton('Re-calibrate')
+        btn_recalib.setObjectName('btn_ghost')
         btn_recalib.setMinimumHeight(42)
         btn_recalib.clicked.connect(self.recalibrate_requested.emit)
 
         btn_quit = QPushButton('Quit')
-        btn_quit.setObjectName('btn_ghost')
+        btn_quit.setObjectName('btn_accent')
         btn_quit.setMinimumHeight(42)
         btn_quit.clicked.connect(self.quit_requested.emit)
 
@@ -1247,8 +1341,9 @@ class BilliardsApp(QMainWindow):
         self._wants_projector: bool = False
 
         # ── Rendering state ──────────────────────────────────────────────────
-        self.mode   = MODE_SCREEN
-        self.paused = False
+        self.mode      = MODE_SCREEN
+        self.paused    = False
+        self._raw_view = False
 
         # ── Calibration homographies (in-memory only) ────────────────────────
         self.cam_H      : Optional[np.ndarray] = None   # camera px → table cm
@@ -1362,7 +1457,7 @@ class BilliardsApp(QMainWindow):
             self._last_cue_present = any(b.get('is_cue') for b in balls)
 
         # ── Produce display-space (pixel) canvas ──────────────────────────────
-        if top_down:
+        if top_down and not self._raw_view:
             canvas = self._warp_to_top_down(frame)
         else:
             canvas = frame.copy()
@@ -1549,7 +1644,20 @@ class BilliardsApp(QMainWindow):
         sidebar = QWidget()
         sidebar.setFixedWidth(260)
         sidebar.setStyleSheet('background-color: #ece6d8;')
-        sb = QVBoxLayout(sidebar)
+        outer_sb_layout = QVBoxLayout(sidebar)
+        outer_sb_layout.setContentsMargins(0, 0, 0, 0)
+        outer_sb_layout.setSpacing(0)
+
+        scroll_area = QScrollArea()
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setStyleSheet('background-color: #ece6d8;')
+
+        scroll_content = QWidget()
+        scroll_content.setStyleSheet('background-color: #ece6d8;')
+        sb = QVBoxLayout(scroll_content)
         sb.setContentsMargins(10, 8, 10, 8)
         sb.setSpacing(4)
 
@@ -1667,24 +1775,33 @@ class BilliardsApp(QMainWindow):
         self.btn_capture     = QPushButton('Capture')
         self.btn_mode        = QPushButton('Switch to Projection')
         self.btn_recalib     = QPushButton('Re-calibrate')
+        self.btn_homography  = QPushButton('Disable Homography')
 
+        self.btn_start_game.setEnabled(False)
         self.btn_start_over.setObjectName('btn_ghost')
-        self.btn_recalib.setObjectName('btn_accent')
+        self.btn_start_over.setEnabled(False)
+        self.btn_capture.setObjectName('btn_ghost')
+        self.btn_mode.setObjectName('btn_ghost')
+        self.btn_mode.setEnabled(False)
+        self.btn_recalib.setObjectName('btn_ghost')
+        self.btn_homography.setObjectName('btn_ghost')
 
         self.btn_start_game.setToolTip('Validate 5 balls and start a new round')
         self.btn_start_over.setToolTip('Reset strokes and remaining balls to start a new round')
         self.btn_capture.setToolTip('Save current frame to disk (Space)')
         self.btn_mode.setToolTip('Toggle Screen / Projection (M)')
         self.btn_recalib.setToolTip('Go back to calibration page')
+        self.btn_homography.setToolTip('Toggle raw / top-down view')
 
         self.btn_start_game.clicked.connect(self._on_start_game)
         self.btn_start_over.clicked.connect(self._on_start_over)
         self.btn_capture.clicked.connect(self._on_capture)
         self.btn_mode.clicked.connect(self._on_toggle_mode)
         self.btn_recalib.clicked.connect(self._on_recalibrate)
+        self.btn_homography.clicked.connect(self._on_toggle_homography)
 
         for btn in (self.btn_start_game, self.btn_start_over, self.btn_capture,
-                    self.btn_mode, self.btn_recalib):
+                    self.btn_mode, self.btn_recalib, self.btn_homography):
             sb.addWidget(btn)
 
         sb.addStretch()
@@ -1703,6 +1820,9 @@ class BilliardsApp(QMainWindow):
         hint.setAlignment(Qt.AlignCenter)
         hint.setWordWrap(True)
         sb.addWidget(hint)
+
+        scroll_area.setWidget(scroll_content)
+        outer_sb_layout.addWidget(scroll_area)
 
         main_layout.addWidget(sidebar, stretch=0)
         return widget
@@ -2377,8 +2497,8 @@ class BilliardsApp(QMainWindow):
     def _on_toggle_mode(self):
         if self.mode == MODE_SCREEN:
             self.mode = MODE_PROJECTION
-            self.btn_mode.setText('Switch to Screen')
-            self.btn_mode.setObjectName('btn_mode_active')
+            self.btn_mode.setText('Back to Screen')
+            self.btn_mode.setObjectName('btn_active')
             if self.proj_window is None:
                 self.proj_window = ProjectorWindow(close_callback=self._on_toggle_mode)
             self.proj_window.show_on_best_screen()
@@ -2398,6 +2518,13 @@ class BilliardsApp(QMainWindow):
             self.statusBar().showMessage('Screen mode.')
         self.btn_mode.setStyleSheet('')
         self._update_status_panel()
+
+    def _on_toggle_homography(self):
+        """Toggle between top-down (homography) and raw camera view."""
+        self._raw_view = not self._raw_view
+        self.btn_homography.setText(
+            'Enable Homography' if self._raw_view else 'Disable Homography'
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Sidebar status update
@@ -2439,19 +2566,47 @@ class BilliardsApp(QMainWindow):
         rack_html = cue_dot + ('&nbsp;' + colored_dots if colored_dots else '')
         self.lbl_ball_rack.setText(rack_html)
 
-        # Start Game / Pause / Resume button
+        # ── Button state machine ──────────────────────────────────────────────
         from golf_game import STATE_SETUP, STATE_GAME_OVER
-        game = getattr(self, 'game', None)
-        if game is None or game.state in (STATE_SETUP, STATE_GAME_OVER):
-            self.btn_start_game.setText('Start Game')
-            self.btn_start_game.setObjectName('btn_accent')
-        elif self.paused:
-            self.btn_start_game.setText('Resume Game')
-            self.btn_start_game.setObjectName('')
+        game  = getattr(self, 'game', None)
+        balls = getattr(self, '_last_balls', [])
+        game_active = (game is not None and
+                       game.state not in (STATE_SETUP, STATE_GAME_OVER))
+
+        # btn_start_game
+        if game_active:
+            if self.paused:
+                self.btn_start_game.setText('Resume Game')
+                self.btn_start_game.setObjectName('')
+            else:
+                self.btn_start_game.setText('Pause Game')
+                self.btn_start_game.setObjectName('btn_accent')
+            self.btn_start_game.setEnabled(True)
         else:
-            self.btn_start_game.setText('Pause Game')
+            self.btn_start_game.setText('Start Game')
             self.btn_start_game.setObjectName('')
-        self.btn_start_game.setStyleSheet('')   # force QSS re-evaluation
+            self.btn_start_game.setEnabled(len(balls) == 5)
+        self.btn_start_game.setStyleSheet('')
+
+        # btn_start_over: ghost + enabled when game active, disabled otherwise
+        if game_active:
+            self.btn_start_over.setObjectName('btn_ghost')
+            self.btn_start_over.setEnabled(True)
+        else:
+            self.btn_start_over.setObjectName('')
+            self.btn_start_over.setEnabled(False)
+        self.btn_start_over.setStyleSheet('')
+
+        # btn_mode: active (orange) when projection on, ghost when screen mode
+        if self.mode == MODE_PROJECTION:
+            self.btn_mode.setObjectName('btn_active')
+            self.btn_mode.setText('Back to Screen')
+            self.btn_mode.setEnabled(True)
+        else:
+            self.btn_mode.setObjectName('btn_ghost')
+            self.btn_mode.setText('Switch to Projection')
+            self.btn_mode.setEnabled(getattr(self, '_wants_projector', False))
+        self.btn_mode.setStyleSheet('')
 
         if self._last_game_state == 'GAME_OVER':
             self.lbl_game_msg.setText(
