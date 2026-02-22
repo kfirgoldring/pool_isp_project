@@ -25,7 +25,7 @@ import cv2
 import numpy as np
 
 # ── Project modules ───────────────────────────────────────────────────────────
-from game_tracker import GameTracker, ST_TRACKING, TABLE_WIDTH_CM, TABLE_HEIGHT_CM
+from game_tracker import GameTracker, ST_TRACKING, ST_DISTURBED, TABLE_WIDTH_CM, TABLE_HEIGHT_CM
 from trajectory import suggest_best_shot
 
 # ── Ball Detection import (Person 1's module) ─────────────────────────────────
@@ -148,7 +148,7 @@ def _run_tick(window, gt: GameTracker) -> None:
     cue_path:    List[Tuple[float, float]] = []
     target_path: List[Tuple[float, float]] = []
 
-    if gt.state == ST_TRACKING and len(balls) >= 2:
+    if gt.state in (ST_TRACKING, ST_DISTURBED) and len(balls) >= 2:
         cue_ball = gt.get_cue_ball(balls)
         if cue_ball is not None and cue_ball.get('center_cm') is not None:
             cue_cm = cue_ball['center_cm']

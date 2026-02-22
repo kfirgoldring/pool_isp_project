@@ -59,7 +59,7 @@ SHOT_THRESHOLD_CM: float = 2.0
 
 # Frame-diff motion detection: fraction of pixels whose intensity change
 # exceeds MOTION_DIFF_THRESH before the frame counts as "has motion".
-MOTION_PIXEL_FRAC:  float = 0.02
+MOTION_PIXEL_FRAC:  float = 0.05
 MOTION_DIFF_THRESH: int   = 30
 
 # Consecutive calm frames required before leaving DISTURBED (~1 s at 30 fps).
