@@ -36,24 +36,24 @@ class BallDetectionConfig:
     def __init__(
         self,
         green_hue_window: int = 12,
-        green_min_sat: int = 60,
+        green_min_sat: int = 200,
         green_min_val: int = 40,
         clahe_enabled: bool = True,
         clahe_clip_limit: float = 2.0,
         clahe_grid_size: int = 8,
-        kernel_size: int = 5,
+        kernel_size: int = 3,
         hough_dp: float = 1.2,
         hough_param1: float = 120.0,
         hough_param2: float = 14.0,
-        min_circularity: float = 0.4,
-        min_area_ratio: float = 0.002,
-        diff_ratio: float = 0.3,
+        min_circularity: float = 0.3,
+        min_area_ratio: float = 0.003,
+        diff_ratio: float = 0.2,
         edge_margin: float = 0,
         hue_similarity_thresh: float = 10.0,
         # Color classification thresholds (HSV
-        yellow_hue: Tuple[int, int] = (10, 20),
+        yellow_hue: Tuple[int, int] = (20, 30),
         blue_hue: Tuple[int, int] = (95, 115),
-        purple_hue: Tuple[int, int] = (120, 140),
+        purple_hue: Tuple[int, int] = (80, 90),
         red1_hue: Tuple[int, int] = (0, 10),
         red2_hue: Tuple[int, int] = (170, 179),
         white_sat_max: int = 40,
@@ -152,9 +152,29 @@ def _green_mask(
         mask1 = cv2.inRange(hsv, lower2, upper2) | cv2.inRange(hsv, lower3, upper3)
 
     return cv2.bitwise_and(mask1, table_mask)
-def _median_hue_in_bbox(
+def _circle_mask(
+    shape: Tuple[int, int],
+    center: Tuple[float, float],
+    radius: float,
+    inner_scale: float = 0.0,
+) -> np.ndarray:
+    h, w = shape
+    if radius <= 0:
+        return np.zeros((h, w), dtype=bool)
+    cx, cy = float(center[0]), float(center[1])
+    yy, xx = np.ogrid[:h, :w]
+    r2 = radius * radius
+    outer = ((xx - cx) ** 2 + (yy - cy) ** 2) <= r2
+    if inner_scale <= 0.0:
+        return outer
+    inner_r = max(0.0, radius * inner_scale)
+    inner = ((xx - cx) ** 2 + (yy - cy) ** 2) <= (inner_r * inner_r)
+    return outer & (~inner)
+
+def _median_hue_in_circle(
     hsv: np.ndarray,
-    bbox: BBox,
+    center: Tuple[float, float],
+    radius: float,
     min_sat: int,
     min_val: int,
 ) -> Optional[float]:
@@ -162,20 +182,16 @@ def _median_hue_in_bbox(
     Circular median hue in [0, 180) for robust color classification.
     Uses the sample hue that minimizes summed circular distance.
     """
-    x, y, w, h = bbox
     h_img, w_img = hsv.shape[:2]
-    x0 = max(0, x)
-    y0 = max(0, y)
-    x1 = min(w_img, x + w)
-    y1 = min(h_img, y + h)
-    if x1 <= x0 or y1 <= y0:
+    if radius <= 0:
         return None
-
-    roi = hsv[y0:y1, x0:x1]
-    h_ch = roi[:, :, 0]
-    s_ch = roi[:, :, 1]
-    v_ch = roi[:, :, 2]
-    valid = (s_ch >= min_sat) & (v_ch >= min_val)
+    mask = _circle_mask((h_img, w_img), center, radius, inner_scale=0.0)
+    if not np.any(mask):
+        return None
+    h_ch = hsv[:, :, 0]
+    s_ch = hsv[:, :, 1]
+    v_ch = hsv[:, :, 2]
+    valid = mask & (s_ch >= min_sat) & (v_ch >= min_val)
     if not np.any(valid):
         return None
 
@@ -185,7 +201,6 @@ def _median_hue_in_bbox(
     if hues.size == 1:
         return float(hues[0])
 
-    # Reduce compute while keeping robustness for large ROIs.
     max_samples = 500
     if hues.size > max_samples:
         idx = np.linspace(0, hues.size - 1, max_samples, dtype=np.int32)
@@ -198,58 +213,41 @@ def _median_hue_in_bbox(
     best_idx = int(np.argmin(np.sum(circ_d, axis=1)))
     return float(hues[best_idx])
 
-def _mean_sv_in_bbox(
+def _mean_sv_in_circle(
     hsv: np.ndarray,
-    bbox: BBox,
+    center: Tuple[float, float],
+    radius: float,
 ) -> Optional[Tuple[float, float]]:
-    x, y, w, h = bbox
     h_img, w_img = hsv.shape[:2]
-    x0 = max(0, x)
-    y0 = max(0, y)
-    x1 = min(w_img, x + w)
-    y1 = min(h_img, y + h)
-    if x1 <= x0 or y1 <= y0:
+    if radius <= 0:
         return None
-    roi = hsv[y0:y1, x0:x1]
-    if roi.size == 0:
+    mask = _circle_mask((h_img, w_img), center, radius, inner_scale=0.0)
+    if not np.any(mask):
         return None
-    s_ch = roi[:, :, 1].astype(np.float32)
-    v_ch = roi[:, :, 2].astype(np.float32)
-    return float(np.mean(s_ch)), float(np.mean(v_ch))
+    s_ch = hsv[:, :, 1].astype(np.float32)
+    v_ch = hsv[:, :, 2].astype(np.float32)
+    return float(np.mean(s_ch[mask])), float(np.mean(v_ch[mask]))
 
-
-def _dark_ratio_in_bbox(
+def _dark_ratio_in_circle(
     hsv: np.ndarray,
-    bbox: BBox,
+    center: Tuple[float, float],
+    radius: float,
     val_max: int,
     sat_max: int = 255,
     inner_scale: float = 1.0,
 ) -> Optional[float]:
-    x, y, w, h = bbox
     h_img, w_img = hsv.shape[:2]
-    x0 = max(0, x)
-    y0 = max(0, y)
-    x1 = min(w_img, x + w)
-    y1 = min(h_img, y + h)
-    if x1 <= x0 or y1 <= y0:
+    if radius <= 0:
         return None
-    roi = hsv[y0:y1, x0:x1]
-    if roi.size == 0:
+    mask = _circle_mask((h_img, w_img), center, radius, inner_scale=0.0)
+    if not np.any(mask):
         return None
-    v = roi[:, :, 2]
-    s = roi[:, :, 1]
-
     if inner_scale < 1.0:
-        h_roi, w_roi = v.shape[:2]
-        cx = (w_roi - 1) * 0.5
-        cy = (h_roi - 1) * 0.5
-        r = max(1.0, 0.5 * min(w_roi, h_roi) * inner_scale)
-        yy, xx = np.ogrid[:h_roi, :w_roi]
-        inner = ((xx - cx) ** 2 + (yy - cy) ** 2) <= (r * r)
-    else:
-        inner = np.ones(v.shape, dtype=bool)
-
-    valid = inner & (s <= sat_max)
+        inner = _circle_mask((h_img, w_img), center, radius, inner_scale=inner_scale)
+        mask = mask & inner
+    v = hsv[:, :, 2]
+    s = hsv[:, :, 1]
+    valid = mask & (s <= sat_max)
     total = int(np.count_nonzero(valid))
     if total == 0:
         return None
@@ -258,15 +256,16 @@ def _dark_ratio_in_bbox(
 
 def _classify_color(
     hsv: np.ndarray,
-    bbox: BBox,
+    center: Tuple[float, float],
+    radius: float,
     cfg: BallDetectionConfig,
 ) -> str:
-    sv = _mean_sv_in_bbox(hsv, bbox)
+    sv = _mean_sv_in_circle(hsv, center, radius)
     if sv is not None:
         mean_s, mean_v = sv
         if mean_s <= cfg.white_sat_max and mean_v >= cfg.white_val_min:
             return "white"
-    median_hue = _median_hue_in_bbox(hsv, bbox, cfg.green_min_sat, cfg.green_min_val)
+    median_hue = _median_hue_in_circle(hsv, center, radius, cfg.green_min_sat, cfg.green_min_val)
     if median_hue is None:
         return "unknown"
     h = float(median_hue)
@@ -480,7 +479,7 @@ def detect_balls_with_color(
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     out: List[List[object]] = []
     for d in detections:
-        color = _classify_color(hsv, d.bbox, cfg)
+        color = _classify_color(hsv, d.center, d.radius_px, cfg)
         out.append([float(d.center[0]), float(d.center[1]), color])
     if not out:
         return np.empty((0, 3), dtype=object)
@@ -492,12 +491,12 @@ def draw_detections(
     color_center: Tuple[int, int, int] = (0, 0, 255),
 ) -> np.ndarray:
     """
-    Create a new image with ball centroids and bounding boxes drawn.
+    Create a new image with ball centroids and circles drawn.
 
     Args:
         frame_bgr: Input image (BGR).
         detections: Iterable of BallDetection.
-        color_bbox: BGR color for bounding boxes.
+        color_bbox: BGR color for circles.
         color_center: BGR color for centroids.
 
     Returns:
@@ -507,16 +506,17 @@ def draw_detections(
         return None
     vis = frame_bgr.copy()
     for det in detections:
-        x, y, w, h = det.bbox
-        cv2.rectangle(vis, (x, y), (x + w, y + h), color_bbox, 2)
         cx, cy = det.center
+        r = int(round(det.radius_px))
+        if r > 0:
+            cv2.circle(vis, (int(round(cx)), int(round(cy))), r, color_bbox, 2)
         cv2.circle(vis, (int(round(cx)), int(round(cy))), 4, color_center, -1)
     return vis
 
 
 if __name__ == "__main__":
-    ref_path="WhatsApp Image 2026-02-21 at 17.47.54.jpeg"
-    img_path="WhatsApp Image 2026-02-21 at 17.47.55.jpeg"
+    ref_path="WhatsApp Image 2026-02-22 at 09.44.04 (1).jpeg"
+    img_path="WhatsApp Image 2026-02-22 at 09.44.07.jpeg"
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
@@ -542,13 +542,12 @@ if __name__ == "__main__":
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (0, 255, 0),
-            2,
-            cv2.LINE_AA,
+            2,            cv2.LINE_AA,
         )
     cv2.imwrite("pool_table_annotated.jpeg", vis)
     print(f"detections: {len(dets)}")
     for i, d in enumerate(dets):
-        median_hue = _median_hue_in_bbox(hsv, d.bbox, cfg.green_min_sat, cfg.green_min_val)
+        median_hue = _median_hue_in_circle(hsv, d.center, d.radius_px, cfg.green_min_sat, cfg.green_min_val)
         x, y, w, h = d.bbox
         px_area = w * h
         ratio = (px_area / table_area_px) if table_area_px > 0 else 0.0
