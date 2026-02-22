@@ -13,22 +13,24 @@ from Physics_Engine import is_path_blocked, find_bank_target_paths
 import math
 from typing import List, Tuple
 
-def compute_pocket_positions(table_width_cm: float, table_height_cm: float, offset_cm: float) -> List[Tuple[float, float]]:
-    """
-    Computes pocket positions with axis-aligned offsets.
-    Logic: If it's a side pocket (the middle index of xs), offset only the axis towards the center.
-    """
-    pockets = []
-    
-    # Define the X and Y coordinates with their respective offsets
-    # Corners are offset by offset_cm, middle X is exactly at center
-    xs = [offset_cm, table_width_cm / 2, table_width_cm - offset_cm]
-    ys = [offset_cm, table_height_cm - offset_cm]
-    
-    for y in ys:
-        for x in xs:
-            pockets.append((x, y))
-            
+def compute_pocket_positions(table_width_cm: float, table_height_cm: float, offset_cm: float):
+    """Compute the (x, y) positions of the 6 pockets based on table dimensions and offset."""
+
+    w = table_width_cm
+    h = table_height_cm
+    o = offset_cm
+    pockets = [
+        # Top row
+        (o, o),          # top-left corner
+        (w/2, o),        # top-middle (side pocket)
+        (w-o, o),        # top-right corner
+
+        # Bottom row
+        (o, h-o),        # bottom-left corner
+        (w/2, h-o),      # bottom-middle (side pocket)
+        (w-o, h-o)       # bottom-right corner
+    ]
+
     return pockets
 
 # Adjust offset as needed
