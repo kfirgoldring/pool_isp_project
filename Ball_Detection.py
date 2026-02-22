@@ -46,14 +46,14 @@ class BallDetectionConfig:
         hough_param1: float = 120.0,
         hough_param2: float = 14.0,
         min_circularity: float = 0.3,
-        min_area_ratio: float = 0.003,
+        min_area_ratio: float = 0.002,
         diff_ratio: float = 0.2,
         edge_margin: float = 0,
         hue_similarity_thresh: float = 10.0,
         # Color classification thresholds (HSV
-        yellow_hue: Tuple[int, int] = (20, 30),
+        yellow_hue: Tuple[int, int] = (20, 40),
         blue_hue: Tuple[int, int] = (95, 115),
-        purple_hue: Tuple[int, int] = (80, 90),
+        purple_hue: Tuple[int, int] = (60, 90),
         red1_hue: Tuple[int, int] = (0, 10),
         red2_hue: Tuple[int, int] = (170, 179),
         white_sat_max: int = 40,
@@ -63,6 +63,7 @@ class BallDetectionConfig:
         black_dark_ratio_min: float = 0.45,
         black_sat_for_dark: int = 110,
         black_inner_scale: float = 0.7,
+        white_sat_diff_thresh: int = 50,
     ) -> None:
         # HSV thresholds for green table (will be adapted around dominant hue)
         self.green_hue_window = green_hue_window
@@ -100,6 +101,7 @@ class BallDetectionConfig:
         self.black_dark_ratio_min = black_dark_ratio_min
         self.black_sat_for_dark = black_sat_for_dark
         self.black_inner_scale = black_inner_scale
+        self.white_sat_diff_thresh = white_sat_diff_thresh
 
 
 def _order_points_clockwise(pts: np.ndarray) -> np.ndarray:
@@ -213,7 +215,7 @@ def _median_hue_in_circle(
     best_idx = int(np.argmin(np.sum(circ_d, axis=1)))
     return float(hues[best_idx])
 
-def _mean_sv_in_circle(
+def _median_sv_in_circle(
     hsv: np.ndarray,
     center: Tuple[float, float],
     radius: float,
@@ -226,7 +228,7 @@ def _mean_sv_in_circle(
         return None
     s_ch = hsv[:, :, 1].astype(np.float32)
     v_ch = hsv[:, :, 2].astype(np.float32)
-    return float(np.mean(s_ch[mask])), float(np.mean(v_ch[mask]))
+    return float(np.median(s_ch[mask])), float(np.median(v_ch[mask]))
 
 def _dark_ratio_in_circle(
     hsv: np.ndarray,
@@ -260,10 +262,10 @@ def _classify_color(
     radius: float,
     cfg: BallDetectionConfig,
 ) -> str:
-    sv = _mean_sv_in_circle(hsv, center, radius)
+    sv = _median_sv_in_circle(hsv, center, radius)
     if sv is not None:
-        mean_s, mean_v = sv
-        if mean_s <= cfg.white_sat_max and mean_v >= cfg.white_val_min:
+        median_s, median_v = sv
+        if median_v - median_s >= cfg.white_sat_diff_thresh:
             return "white"
     median_hue = _median_hue_in_circle(hsv, center, radius, cfg.green_min_sat, cfg.green_min_val)
     if median_hue is None:
@@ -282,7 +284,7 @@ def _classify_color(
 
 def _estimate_ball_radius_px(
     corners: np.ndarray,
-    ball_diameter_cm=1.5,
+    ball_diameter_cm=3,
     table_size_cm=120.0,
 ) -> Optional[float]:
     if ball_diameter_cm is None or table_size_cm is None:
@@ -394,7 +396,7 @@ def detect_balls(
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     # Prepare grayscale for Hough
     gray = cv2.cvtColor(diff_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.medianBlur(gray, 5)
+    gray = cv2.medianBlur(gray, 3)
     gray = cv2.bitwise_and(gray, gray, mask=table_mask)
     _, diff_mask = cv2.threshold(gray, 25, 255, cv2.THRESH_BINARY)
     diff_mask = cv2.morphologyEx(diff_mask, cv2.MORPH_OPEN, kernel)
@@ -411,6 +413,7 @@ def detect_balls(
     min_area_px = cfg.min_area_ratio * table_area_px
 #contour-based detection on diff mask
     contours, _ = cv2.findContours(diff_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(diff_mask, contours, -1, (0, 0, 255), 2)
     detections: List[BallDetection] = []
     for cnt in contours:
         area = cv2.contourArea(cnt)
@@ -515,8 +518,8 @@ def draw_detections(
 
 
 if __name__ == "__main__":
-    ref_path="WhatsApp Image 2026-02-22 at 09.44.04 (1).jpeg"
-    img_path="WhatsApp Image 2026-02-22 at 09.44.07.jpeg"
+    ref_path="/Users/inega/Python/AcademicCourses/digital-image-processing/pool_isp_project/captures/ref.png"
+    img_path="/Users/inega/Python/AcademicCourses/digital-image-processing/pool_isp_project/captures/p6.png"
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
@@ -548,9 +551,26 @@ if __name__ == "__main__":
     print(f"detections: {len(dets)}")
     for i, d in enumerate(dets):
         median_hue = _median_hue_in_circle(hsv, d.center, d.radius_px, cfg.green_min_sat, cfg.green_min_val)
+        median_sv = _median_sv_in_circle(hsv, d.center, d.radius_px)
+        median_s, median_v = median_sv if median_sv is not None else (None, None)
         x, y, w, h = d.bbox
         px_area = w * h
         ratio = (px_area / table_area_px) if table_area_px > 0 else 0.0
-        print(i, d.center, d.bbox, d.radius_px, "px_area", px_area, "ratio", ratio, "median_hue", median_hue)
+        print(
+            i,
+            d.center,
+            d.bbox,
+            d.radius_px,
+            "px_area",
+            px_area,
+            "ratio",
+            ratio,
+            "median_hue",
+            median_hue,
+            "median_s",
+            None if median_s is None else round(median_s, 2),
+            "median_v",
+            None if median_v is None else round(median_v, 2),
+        )
     print("colored detections:")
     print(colored)
