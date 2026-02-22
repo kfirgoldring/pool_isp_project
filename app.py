@@ -1374,9 +1374,8 @@ class BilliardsApp(QMainWindow):
         # ── Game-state cache for status panel (set by render()) ──────────────
         self._last_stroke_count : int       = 0
         self._last_remaining    : List[str] = []
-        self._last_game_state   : str       = 'WAITING_FOR_SHOT'
+        self._last_game_state   : str       = 'WAITING_FOR_BALLS'
         self._last_selected_color: Optional[str] = None
-        self._last_tracker_state : str       = 'TRACKING'
         self._last_cue_present  : bool      = True   # False when cue ball leaves table
 
         # ── Player / leaderboard state ───────────────────────────────────────
@@ -1424,7 +1423,6 @@ class BilliardsApp(QMainWindow):
         stroke_count:   int,
         remaining:      List[str],
         selected_color: Optional[str] = None,
-        tracker_state:  str = 'TRACKING',
     ) -> None:
         """
         Draw overlays on the frame and push to the camera label.
@@ -1437,7 +1435,7 @@ class BilliardsApp(QMainWindow):
                        'center' (camera px) is used as fallback when cam_H is None.
         cue_path     : [(x_cm, y_cm), ...] in table centimetres.
         target_path  : [(x_cm, y_cm), ...] in table centimetres.
-        game_state   : current state string (e.g. 'WAITING_FOR_SHOT').
+        game_state   : current state string (e.g. 'TRACKING', 'DISTURBED').
         stroke_count : number of strokes so far.
         remaining    : list of color names still to pocket.
         selected_color : color of the currently selected target ball, or None.
@@ -1450,7 +1448,6 @@ class BilliardsApp(QMainWindow):
         self._last_remaining     = remaining
         self._last_game_state    = game_state
         self._last_selected_color = selected_color
-        self._last_tracker_state = tracker_state
         # Track cue ball and cache raw ball list (used by _on_start_game)
         self._last_balls = balls
         if balls:
@@ -2408,9 +2405,9 @@ class BilliardsApp(QMainWindow):
             self.lbl_game_msg.setText('Game not initialized yet.')
             return
 
-        from golf_game import STATE_SETUP, STATE_GAME_OVER
+        from game_tracker import ST_WAITING_FOR_BALLS, ST_GAME_OVER
         # If a game is active, toggle pause/resume
-        if game.state not in (STATE_SETUP, STATE_GAME_OVER):
+        if game.state not in (ST_WAITING_FOR_BALLS, ST_GAME_OVER):
             self.paused = not self.paused
             self._update_status_panel()
             return
@@ -2437,7 +2434,7 @@ class BilliardsApp(QMainWindow):
             return
 
         self.paused = False
-        game.reset(colored)
+        game.start_game(colored, balls)
         self.lbl_game_msg.setText('Game started!')
         self.lbl_stroke_num.setText('0')
         self.lbl_remaining_num.setText(str(len(colored)))
@@ -2449,15 +2446,7 @@ class BilliardsApp(QMainWindow):
         game = getattr(self, 'game', None)
         if game is None:
             return
-        from golf_game import STATE_SETUP
-        game.state = STATE_SETUP
-        game.stroke_count = 0
-        game.remaining_balls = []
-        game.pocketed_balls = []
-        game.selected_target_color = None
-        game._snapshot_before_shot = {}
-        game._prev_positions = {}
-        game._stationary_frames = 0
+        game.reset()
         self.lbl_game_msg.setText('Game reset. Place 5 balls and press Start Game.')
         self.lbl_stroke_num.setText('0')
         self.lbl_remaining_num.setText('0')
@@ -2553,11 +2542,11 @@ class BilliardsApp(QMainWindow):
         self.lbl_ball_rack.setText(rack_html)
 
         # ── Button state machine ──────────────────────────────────────────────
-        from golf_game import STATE_SETUP, STATE_GAME_OVER
+        from game_tracker import ST_WAITING_FOR_BALLS, ST_GAME_OVER
         game  = getattr(self, 'game', None)
         balls = getattr(self, '_last_balls', [])
         game_active = (game is not None and
-                       game.state not in (STATE_SETUP, STATE_GAME_OVER))
+                       game.state not in (ST_WAITING_FOR_BALLS, ST_GAME_OVER))
 
         # btn_start_game
         if game_active:
@@ -2600,7 +2589,7 @@ class BilliardsApp(QMainWindow):
             # Trigger leaderboard (only once, while we're still on the main page)
             if self._stack.currentIndex() == 3:
                 self._show_leaderboard()
-        elif self._last_game_state == 'SETUP':
+        elif self._last_game_state == 'WAITING_FOR_BALLS':
             self.lbl_game_msg.setText('')
 
     # ─────────────────────────────────────────────────────────────────────────
