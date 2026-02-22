@@ -2534,9 +2534,14 @@ class BilliardsApp(QMainWindow):
             cue_dot = '<span style="color:#f0f0f0; font-size:18px;" title="Cue ball">\u25cf</span>'
         else:
             cue_dot = '<span style="color:#555555; font-size:18px;" title="Cue ball \u2014 not on table">\u25cb</span>'
+        detected_colors = [
+            b['color']
+            for b in getattr(self, '_last_balls', [])
+            if not b.get('is_cue') and b.get('color')
+        ]
         colored_dots = ' '.join(
             f'<span style="color:{_BALL_HEX.get(c, "#888888")}; font-size:18px;">\u25cf</span>'
-            for c in self._last_remaining
+            for c in detected_colors
         )
         rack_html = cue_dot + ('&nbsp;' + colored_dots if colored_dots else '')
         self.lbl_ball_rack.setText(rack_html)
@@ -2590,6 +2595,16 @@ class BilliardsApp(QMainWindow):
             if self._stack.currentIndex() == 3:
                 self._show_leaderboard()
         elif self._last_game_state == 'WAITING_FOR_BALLS':
+            self.lbl_game_msg.setText('')
+        elif (game is not None
+              and getattr(game, 'cue_ball_pocketed', False)
+              and not self._last_cue_present):
+            self.lbl_game_msg.setText(
+                'Foul! Cue ball pocketed (+3 penalty) \u2014 place it back on the table.'
+            )
+        elif (game is not None
+              and getattr(game, 'cue_ball_pocketed', False)
+              and self._last_cue_present):
             self.lbl_game_msg.setText('')
 
     # ─────────────────────────────────────────────────────────────────────────

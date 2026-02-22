@@ -69,6 +69,9 @@ CALM_FRAMES_REQUIRED: int = 30
 # checking for strokes.  Keeps a single noisy frame from causing a false shot.
 REACQUISITION_TICKS: int = 5
 
+# Stroke penalty applied when the cue ball is pocketed.
+CUE_BALL_PENALTY: int = 3
+
 
 class GameTracker:
     """Unified game-state + ball-tracking controller.
@@ -109,6 +112,7 @@ class GameTracker:
         self.remaining_balls: List[str]     = []
         self.pocketed_balls:  List[str]     = []
         self.selected_target_color: Optional[str] = None
+        self.cue_ball_pocketed: bool        = False   # True after a cue-ball pocket, cleared next stroke
 
         # ── Internal tracking state ──────────────────────────────────────────
         self._tracks: List[Dict]            = []
@@ -165,6 +169,7 @@ class GameTracker:
         self.remaining_balls = list(colored_ball_colors)
         self.pocketed_balls = []
         self.selected_target_color = None
+        self.cue_ball_pocketed = False
         self._confirmed_balls = list(initial_balls)
         self._confirmed_pos = _extract_positions(initial_balls)
         self._pre_disturb_pos = {}
@@ -181,6 +186,7 @@ class GameTracker:
         self.remaining_balls = []
         self.pocketed_balls = []
         self.selected_target_color = None
+        self.cue_ball_pocketed = False
         self._confirmed_balls = []
         self._confirmed_pos = {}
         self._pre_disturb_pos = {}
@@ -323,9 +329,15 @@ class GameTracker:
         new_snapshot: List[Dict],
         new_pos: Dict[str, Tuple[float, float]],
     ) -> None:
-        """Record a stroke: increment count, detect pocketed balls, update
-        confirmed positions, and check for game-over."""
+        """Record a stroke: increment count, detect pocketed balls (including cue
+        ball penalty), update confirmed positions, and check for game-over."""
         self.stroke_count += 1
+        self.cue_ball_pocketed = False  # clear previous flag
+
+        # Detect cue ball pocket: white was tracked before, gone now → +3 penalty
+        if 'white' in self._confirmed_pos and 'white' not in new_pos:
+            self.cue_ball_pocketed = True
+            self.stroke_count += CUE_BALL_PENALTY
 
         for color in list(self._confirmed_pos.keys()):
             if color == 'white':
@@ -478,10 +490,8 @@ def _any_ball_disappeared(
     old_pos: Dict[str, Tuple[float, float]],
     new_pos: Dict[str, Tuple[float, float]],
 ) -> bool:
-    """True if a non-white ball present in *old_pos* is absent from *new_pos*."""
+    """True if any ball present in *old_pos* is absent from *new_pos*."""
     for color in old_pos:
-        if color == 'white':
-            continue
         if color not in new_pos:
             return True
     return False
