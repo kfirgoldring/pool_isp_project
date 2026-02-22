@@ -259,6 +259,32 @@ QScrollBar::handle:vertical {
 QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
 """
 
+# Button inline-stylesheet constants.
+# These are needed because sidebar container widgets use unscoped
+# setStyleSheet('background-color: ...'), which Qt treats as
+# QWidget { background-color: ... } — cascading to all descendants and
+# overriding the global _APP_STYLE QPushButton rules.  Explicit per-widget
+# stylesheets always win, so every button state is set directly.
+_BTN_PRIMARY_SS = (
+    'QPushButton { background-color: #1c3a26; color: #f4efe4; border: none; }'
+    'QPushButton:hover   { background-color: #2a5c38; }'
+    'QPushButton:pressed { background-color: #d95f1a; }'
+)
+_BTN_ACCENT_SS = (
+    'QPushButton { background-color: #d95f1a; color: #f4efe4; border: none; }'
+    'QPushButton:hover   { background-color: #c04a10; }'
+    'QPushButton:pressed { background-color: #a03a08; }'
+)
+_BTN_GHOST_SS = (
+    'QPushButton          { background-color: transparent; color: #2a2520; border: 1px solid #c4b898; }'
+    'QPushButton:hover    { border-color: #1c3a26; color: #1c3a26; }'
+    'QPushButton:pressed  { background-color: #ece6d8; }'
+    'QPushButton:disabled { background-color: #ece6d8; color: #b0a48c; border: 1px solid #ddd4bc; }'
+)
+_BTN_DISABLED_SS = (
+    'QPushButton { background-color: #ece6d8; color: #b0a48c; border: 1px solid #ddd4bc; }'
+)
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # ClickableLabel — QLabel that emits a signal on left mouse click
@@ -675,33 +701,15 @@ class CalibrationPage(QWidget):
 
         sb.addStretch()
 
-        # Inline stylesheet constants — used here and in _update_corner_label.
-        # Needed because intermediate container widgets use unscoped setStyleSheet()
-        # which Qt treats as QWidget { ... }, cascading to all descendants and
-        # overriding the global _APP_STYLE QPushButton rules.
-        self._BTN_PRIMARY_SS = (
-            'QPushButton { background-color: #1c3a26; color: #f4efe4; border: none; }'
-            'QPushButton:hover { background-color: #2a5c38; }'
-            'QPushButton:pressed { background-color: #d95f1a; }'
-        )
-        self._BTN_ACCENT_SS = (
-            'QPushButton { background-color: #d95f1a; color: #f4efe4; border: none; }'
-            'QPushButton:hover { background-color: #c04a10; }'
-            'QPushButton:pressed { background-color: #a03a08; }'
-        )
-        self._BTN_DISABLED_SS = (
-            'QPushButton { background-color: #ece6d8; color: #b0a48c; border: 1px solid #ddd4bc; }'
-        )
-
         self._btn_auto   = QPushButton('Auto-detect')
         self._btn_clear  = QPushButton('Clear Corners')
         self._btn_accept = QPushButton('Confirm Calibration')
 
-        self._btn_auto.setStyleSheet(self._BTN_PRIMARY_SS)
+        self._btn_auto.setStyleSheet(_BTN_PRIMARY_SS)
         self._btn_clear.setEnabled(False)
-        self._btn_clear.setStyleSheet(self._BTN_DISABLED_SS)
+        self._btn_clear.setStyleSheet(_BTN_DISABLED_SS)
         self._btn_accept.setEnabled(False)
-        self._btn_accept.setStyleSheet(self._BTN_DISABLED_SS)
+        self._btn_accept.setStyleSheet(_BTN_DISABLED_SS)
 
         self._btn_auto.clicked.connect(self._on_auto_detect)
         self._btn_clear.clicked.connect(self._on_clear)
@@ -849,18 +857,18 @@ class CalibrationPage(QWidget):
         # Clear Corners: disabled until ≥1 corner placed, then Accent
         if n > 0:
             self._btn_clear.setEnabled(True)
-            self._btn_clear.setStyleSheet(self._BTN_ACCENT_SS)
+            self._btn_clear.setStyleSheet(_BTN_ACCENT_SS)
         else:
             self._btn_clear.setEnabled(False)
-            self._btn_clear.setStyleSheet(self._BTN_DISABLED_SS)
+            self._btn_clear.setStyleSheet(_BTN_DISABLED_SS)
 
         # Confirm Calibration: disabled until exactly 4 corners → Primary
         if n == 4:
             self._btn_accept.setEnabled(True)
-            self._btn_accept.setStyleSheet(self._BTN_PRIMARY_SS)
+            self._btn_accept.setStyleSheet(_BTN_PRIMARY_SS)
         else:
             self._btn_accept.setEnabled(False)
-            self._btn_accept.setStyleSheet(self._BTN_DISABLED_SS)
+            self._btn_accept.setStyleSheet(_BTN_DISABLED_SS)
 
     def _on_clear(self):
         self._corners = []
@@ -1778,13 +1786,14 @@ class BilliardsApp(QMainWindow):
         self.btn_homography  = QPushButton('Disable Homography')
 
         self.btn_start_game.setEnabled(False)
-        self.btn_start_over.setObjectName('btn_ghost')
+        self.btn_start_game.setStyleSheet(_BTN_DISABLED_SS)
         self.btn_start_over.setEnabled(False)
-        self.btn_capture.setObjectName('btn_ghost')
-        self.btn_mode.setObjectName('btn_ghost')
+        self.btn_start_over.setStyleSheet(_BTN_DISABLED_SS)
+        self.btn_capture.setStyleSheet(_BTN_GHOST_SS)
         self.btn_mode.setEnabled(False)
-        self.btn_recalib.setObjectName('btn_ghost')
-        self.btn_homography.setObjectName('btn_ghost')
+        self.btn_mode.setStyleSheet(_BTN_GHOST_SS)
+        self.btn_recalib.setStyleSheet(_BTN_GHOST_SS)
+        self.btn_homography.setStyleSheet(_BTN_GHOST_SS)
 
         self.btn_start_game.setToolTip('Validate 5 balls and start a new round')
         self.btn_start_over.setToolTip('Reset strokes and remaining balls to start a new round')
@@ -2497,8 +2506,6 @@ class BilliardsApp(QMainWindow):
     def _on_toggle_mode(self):
         if self.mode == MODE_SCREEN:
             self.mode = MODE_PROJECTION
-            self.btn_mode.setText('Back to Screen')
-            self.btn_mode.setObjectName('btn_active')
             if self.proj_window is None:
                 self.proj_window = ProjectorWindow(close_callback=self._on_toggle_mode)
             self.proj_window.show_on_best_screen()
@@ -2509,14 +2516,11 @@ class BilliardsApp(QMainWindow):
             self.statusBar().showMessage(msg)
         else:
             self.mode = MODE_SCREEN
-            self.btn_mode.setText('Switch to Projection')
-            self.btn_mode.setObjectName('')
             if self.proj_window is not None:
                 self.proj_window._close_callback = None
                 self.proj_window.hide()
                 self.proj_window._close_callback = self._on_toggle_mode
             self.statusBar().showMessage('Screen mode.')
-        self.btn_mode.setStyleSheet('')
         self._update_status_panel()
 
     def _on_toggle_homography(self):
@@ -2577,36 +2581,35 @@ class BilliardsApp(QMainWindow):
         if game_active:
             if self.paused:
                 self.btn_start_game.setText('Resume Game')
-                self.btn_start_game.setObjectName('')
+                self.btn_start_game.setStyleSheet(_BTN_PRIMARY_SS)
             else:
                 self.btn_start_game.setText('Pause Game')
-                self.btn_start_game.setObjectName('btn_accent')
+                self.btn_start_game.setStyleSheet(_BTN_ACCENT_SS)
             self.btn_start_game.setEnabled(True)
         else:
             self.btn_start_game.setText('Start Game')
-            self.btn_start_game.setObjectName('')
-            self.btn_start_game.setEnabled(len(balls) == 5)
-        self.btn_start_game.setStyleSheet('')
+            can_start = len(balls) == 5
+            self.btn_start_game.setEnabled(can_start)
+            self.btn_start_game.setStyleSheet(_BTN_PRIMARY_SS if can_start else _BTN_DISABLED_SS)
 
-        # btn_start_over: ghost + enabled when game active, disabled otherwise
+        # btn_start_over: ghost when game active, disabled otherwise
         if game_active:
-            self.btn_start_over.setObjectName('btn_ghost')
             self.btn_start_over.setEnabled(True)
+            self.btn_start_over.setStyleSheet(_BTN_GHOST_SS)
         else:
-            self.btn_start_over.setObjectName('')
             self.btn_start_over.setEnabled(False)
-        self.btn_start_over.setStyleSheet('')
+            self.btn_start_over.setStyleSheet(_BTN_DISABLED_SS)
 
         # btn_mode: active (orange) when projection on, ghost when screen mode
         if self.mode == MODE_PROJECTION:
-            self.btn_mode.setObjectName('btn_active')
             self.btn_mode.setText('Back to Screen')
             self.btn_mode.setEnabled(True)
+            self.btn_mode.setStyleSheet(_BTN_ACCENT_SS)
         else:
-            self.btn_mode.setObjectName('btn_ghost')
             self.btn_mode.setText('Switch to Projection')
-            self.btn_mode.setEnabled(getattr(self, '_wants_projector', False))
-        self.btn_mode.setStyleSheet('')
+            has_proj = getattr(self, '_wants_projector', False)
+            self.btn_mode.setEnabled(has_proj)
+            self.btn_mode.setStyleSheet(_BTN_GHOST_SS)
 
         if self._last_game_state == 'GAME_OVER':
             self.lbl_game_msg.setText(
