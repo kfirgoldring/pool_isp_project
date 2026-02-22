@@ -37,7 +37,7 @@ class BallDetectionConfig:
         self,
         green_hue_window: int = 12,
         green_min_sat: int = 200,
-        green_min_val: int = 40,
+        green_min_val: int = 50,
         clahe_enabled: bool = True,
         clahe_clip_limit: float = 2.0,
         clahe_grid_size: int = 8,
@@ -53,7 +53,7 @@ class BallDetectionConfig:
         # Color classification thresholds (HSV
         yellow_hue: Tuple[int, int] = (20, 40),
         blue_hue: Tuple[int, int] = (95, 115),
-        purple_hue: Tuple[int, int] = (60, 90),
+        purple_hue: Tuple[int, int] = (65, 90),
         red1_hue: Tuple[int, int] = (0, 10),
         red2_hue: Tuple[int, int] = (170, 179),
         white_sat_max: int = 40,
@@ -519,7 +519,7 @@ def draw_detections(
 
 if __name__ == "__main__":
     ref_path="/Users/inega/Python/AcademicCourses/digital-image-processing/pool_isp_project/captures/ref.png"
-    img_path="/Users/inega/Python/AcademicCourses/digital-image-processing/pool_isp_project/captures/p6.png"
+    img_path="/Users/inega/Python/AcademicCourses/digital-image-processing/pool_isp_project/captures/blue.png"
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
