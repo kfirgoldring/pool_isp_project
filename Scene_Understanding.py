@@ -9,7 +9,7 @@ def detect_table_green(img):
     hsv = cv2.cvtColor(blurred, cv2.COLOR_BGR2HSV)
 
     lower_green = np.array([60, 0, 0])
-    upper_green = np.array([85, 255, 255])
+    upper_green = np.array([73, 255, 255])
 
     mask = cv2.inRange(hsv, lower_green, upper_green)
 
@@ -46,8 +46,8 @@ def get_table_corners(image):
 
     # Morphology: Close the ball holes and bridge the pocket gaps
     # We use a large rectangular kernel to "straighten" the edges
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (60, 60))
-    closed_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 20))
+    closed_mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
 
     # Find the largest contour (the table surface)
     contours, _ = cv2.findContours(closed_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -113,7 +113,7 @@ def show_hue_histogram():
     Loads an image, converts it to HSV, and displays the histogram of the Hue channel.
     Helps to determine the range of green values for thresholding.
     """
-    image_path = 'table_pics\WIN_20260219_10_29_03_Pro.jpg'
+    image_path = r'table_pics\\table\\new_cam_in_lib_ref.jpeg'
     img = cv2.imread(image_path)
     if img is None:
         print(f"Failed to load image: {image_path}")
@@ -131,7 +131,7 @@ def show_hue_histogram():
     plt.show()
 
 def main():
-    image_path = 'table_pics\WIN_20260219_10_30_02_Pro.jpg'
+    image_path = r'table_pics\\table\\new_cam_in_lib_ref.jpeg'
     get_table_corners(image_path)
 
 if __name__ == "__main__":
