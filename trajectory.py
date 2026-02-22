@@ -8,12 +8,37 @@ import math
 from typing import Dict, List, Optional, Tuple
 from config import BALL_RADIUS_CM, TABLE_HEIGHT_CM, TABLE_WIDTH_CM
 from Physics_Engine import is_path_blocked, find_bank_target_paths
-# â"€â"€â"€ Table constants â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
-# Pocket positions derived from table dimensions â€" 6 pockets at corners and mid-edges.
-POCKET_POSITIONS_CM: List[Tuple[float, float]] = [
+
+# Pocket positions derived from table dimensions and of-set 
+import math
+from typing import List, Tuple
+
+def compute_pocket_positions(table_width_cm: float, table_height_cm: float, offset_cm: float) -> List[Tuple[float, float]]:
+    """
+    Computes pocket positions with axis-aligned offsets.
+    Logic: If it's a side pocket (the middle index of xs), offset only the axis towards the center.
+    """
+    pockets = []
+    
+    # Define the X and Y coordinates with their respective offsets
+    # Corners are offset by offset_cm, middle X is exactly at center
+    xs = [offset_cm, table_width_cm / 2, table_width_cm - offset_cm]
+    ys = [offset_cm, table_height_cm - offset_cm]
+    
+    for y in ys:
+        for x in xs:
+            pockets.append((x, y))
+            
+    return pockets
+
+# Adjust offset as needed
+POCKET_POSITIONS_CM: List[Tuple[float, float]] = compute_pocket_positions(
+    TABLE_WIDTH_CM, TABLE_HEIGHT_CM, offset_cm=2.0 )
+
+'''POCKET_POSITIONS_CM: List[Tuple[float, float]] = [
     (k * TABLE_WIDTH_CM / 2, j * TABLE_HEIGHT_CM)
     for j in (0, 1) for k in (0, 1, 2)
-]
+]'''
 # Expands to: [(0,0), (61,0), (122,0), (0,61), (61,61), (122,61)]
 
 # Squared distance threshold for excluding the cue/target ball from the obstacle list.
