@@ -72,7 +72,7 @@ MODE_PROJECTION = 'projection'
 
 # Top-down (bird's-eye) view — 8 px/cm → 122×61 cm → 976×488 px canvas
 TABLE_DISPLAY_SCALE  = 8
-BALL_RADIUS_TOP_DOWN = 23   # ≈ 2.875 cm × 8 px/cm (standard pool ball)
+BALL_RADIUS_TOP_DOWN = 16   # slightly smaller than actual ball size for cleaner overlay
 
 # Billiards ball color name → OpenCV BGR
 BALL_COLORS_BGR: Dict[str, Tuple[int, int, int]] = {
@@ -759,21 +759,13 @@ class CalibrationPage(QWidget):
         pts = self._corners
 
         for i, pt in enumerate(pts):
-            color = (255, 255, 0) if i == self._drag_idx else (0, 255, 0)
+            color = (16, 74, 192) if i == self._drag_idx else (26, 95, 217)
             cv2.circle(display, pt, 8,  color, -1)
             cv2.circle(display, pt, 15, color,  2)
-            cv2.putText(display, str(i + 1), (pt[0] + 18, pt[1] + 18),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
         if len(pts) >= 2:
             arr = np.array(pts, np.int32)
-            cv2.polylines(display, [arr], len(pts) == 4, (255, 0, 0), 2)
-
-        cv2.putText(display, f'Corners: {len(pts)}/4', (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
-        if len(pts) == 4:
-            cv2.putText(display, 'Click Accept to confirm', (10, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+            cv2.polylines(display, [arr], len(pts) == 4, (26, 95, 217), 2)
 
         pixmap = _bgr_to_pixmap(display)
         self._cam_label.setPixmap(
@@ -1493,11 +1485,8 @@ class BilliardsApp(QMainWindow):
                 disp = ball.get('center')  # camera px fallback
             balls_disp.append({**ball, '_disp': disp})
 
-        # ── Pocket positions in display space ─────────────────────────────────
-        pockets = self._get_pocket_positions(frame)
-
         # ── Draw screen-mode overlays ─────────────────────────────────────────
-        ball_r = BALL_RADIUS_TOP_DOWN if top_down else 15
+        ball_r = BALL_RADIUS_TOP_DOWN if top_down else 10
 
         # 1. Target path (orange)
         if len(target_path_px) >= 2:
@@ -1513,12 +1502,7 @@ class BilliardsApp(QMainWindow):
             ghost = cue_path_px[-1]
             cv2.circle(canvas, ghost, ball_r, COLOR_PATH, 2, cv2.LINE_AA)
 
-        # 4. Pocket markers
-        for pocket in pockets:
-            is_sel = (pocket['name'] == self._selected_pocket_name)
-            self._draw_pocket(canvas, pocket['cam_pos'], selected=is_sel)
-
-        # 5. Detected balls
+        # 4. Detected balls
         for ball in balls_disp:
             disp = ball.get('_disp')
             if disp is None:
@@ -1535,8 +1519,6 @@ class BilliardsApp(QMainWindow):
         # 6. Game-state overlays
         if game_state == 'GAME_OVER':
             self._draw_game_over(canvas, stroke_count)
-        else:
-            self._draw_score_panel(canvas, stroke_count, remaining)
 
         # 7. Pause indicator
         if self.paused:
