@@ -28,6 +28,7 @@ import numpy as np
 from golf_game import (
     GolfGame,
     STATE_WAITING,
+    STATIONARY_FRAMES_REQUIRED,
 )
 from trajectory import suggest_best_shot
 
@@ -98,6 +99,7 @@ class _BallTracker:
         dead_zone_cm:          float = 1.0,
         excess_threshold:      int   = 3,
         settle_frames:         int   = 10,
+        motion_free_required_frames: int = STATIONARY_FRAMES_REQUIRED,
         uniform_detection:     bool  = False,
         tracking_detect_every: int   = 5,
     ):
@@ -109,6 +111,7 @@ class _BallTracker:
         self._dead_zone:       float      = dead_zone_cm
         self._excess_thresh:   int        = excess_threshold
         self._settle_required: int        = settle_frames
+        self._motion_free_required: int   = max(1, int(motion_free_required_frames))
         self._uniform:         bool       = uniform_detection
         self._tracking_interval: int      = max(1, tracking_detect_every)
 
@@ -117,6 +120,7 @@ class _BallTracker:
         self._pre_disturb_snapshot: List[Dict] = []
         self._expected_count:  int        = 0
         self._settle_count:    int        = 0
+        self._motion_free_count: int      = 0
         self._tick_count:      int        = 0
         self._ref_frame: Optional[np.ndarray] = None
 
@@ -140,9 +144,9 @@ class _BallTracker:
     def check_frame(self, frame: np.ndarray) -> None:
         """Cheap frame-diff motion check for TRACKING and DISTURBED states.
 
-        TRACKING  + motion  -> DISTURBED
-        DISTURBED + no motion -> SETTLING  (table is calm, re-acquire balls)
-        DISTURBED + motion  -> stay DISTURBED (update reference for next check)
+        TRACKING  + motion                  -> DISTURBED
+        DISTURBED + enough no-motion frames -> SETTLING (table is calm)
+        DISTURBED + motion                  -> stay DISTURBED
         """
         if self._ref_frame is None:
             self._ref_frame = frame.copy()
@@ -159,14 +163,21 @@ class _BallTracker:
                 self._pre_disturb_snapshot = list(self._stable_snapshot)
                 self._state = _TRK_DISTURBED
                 self._settle_count = 0
-                self._ref_frame = None
+                self._motion_free_count = 0
+                self._ref_frame = frame.copy()
         elif self._state == _TRK_DISTURBED:
             if has_motion:
+                self._motion_free_count = 0
                 self._ref_frame = frame.copy()
             else:
-                self._state = _TRK_SETTLING
-                self._settle_count = 0
-                self._ref_frame = None
+                self._motion_free_count += 1
+                if self._motion_free_count >= self._motion_free_required:
+                    self._state = _TRK_SETTLING
+                    self._settle_count = 0
+                    self._motion_free_count = 0
+                    self._ref_frame = None
+                else:
+                    self._ref_frame = frame.copy()
 
     def update(self, raw_balls: List[Dict]) -> List[Dict]:
         """Process raw detections and return the current ball list."""
@@ -190,9 +201,6 @@ class _BallTracker:
         # ── DISTURBED ───────────────────────────────────────────────────────
         if self._state == _TRK_DISTURBED:
             self._do_tracking(raw_balls, create_new=False)
-            if not is_disturbed:
-                self._state = _TRK_SETTLING
-                self._settle_count = 1
             return list(self._stable_snapshot)
 
         # ── SETTLING ────────────────────────────────────────────────────────
@@ -201,6 +209,7 @@ class _BallTracker:
             if is_disturbed:
                 self._state = _TRK_DISTURBED
                 self._settle_count = 0
+                self._motion_free_count = 0
                 return list(self._stable_snapshot)
 
             self._settle_count += 1
@@ -213,6 +222,7 @@ class _BallTracker:
                     pass
                 self._expected_count = len(self._stable_snapshot)
                 self._state = _TRK_TRACKING
+                self._motion_free_count = 0
                 self._ref_frame = None
                 return list(self._stable_snapshot)
 
@@ -411,6 +421,8 @@ def _run_tick(window, game: GolfGame, tracker: _BallTracker) -> None:
         return
 
     tracker.advance_tick()
+    if not window.use_mock:
+        tracker.check_frame(frame)
 
     if window.use_mock:
         balls = _detect_balls(
@@ -425,8 +437,7 @@ def _run_tick(window, game: GolfGame, tracker: _BallTracker) -> None:
         )
         balls = tracker.update(raw_balls)
     else:
-        # TRACKING — no detection; cheap frame-diff for motion
-        tracker.check_frame(frame)
+        # TRACKING / DISTURBED hold — keep frozen snapshot
         balls = tracker.get_snapshot()
 
     window._last_balls = balls
