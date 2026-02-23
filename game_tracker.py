@@ -152,6 +152,8 @@ class GameTracker:
             if self._reacq_remaining > 0:
                 return True
             return self._tick_count % self._tracking_interval == 0
+        if self.state == ST_DISTURBED and self.cue_ball_pocketed:
+            return True   # keep searching for white while table is disturbed
         return False
 
     # ── Lifecycle methods ────────────────────────────────────────────────────
@@ -248,7 +250,7 @@ class GameTracker:
             return self._tick_tracking(frame, raw_balls)
 
         if self.state == ST_DISTURBED:
-            return self._tick_disturbed(frame)
+            return self._tick_disturbed(frame, raw_balls)
 
         return list(self._confirmed_balls)
 
@@ -282,16 +284,6 @@ class GameTracker:
         if raw_balls:
             self._do_tracking(raw_balls, create_new=True)
 
-        # 2b. Clear scratch-recovery flag once white is stably back on the table
-        if self.cue_ball_pocketed:
-            white_back = next(
-                (t for t in self._tracks
-                 if t.get('is_cue') and t['stale'] == 0 and t['age'] >= self._confirm_frames),
-                None,
-            )
-            if white_back is not None:
-                self.cue_ball_pocketed = False
-
         # 3. During re-acquisition (just returned from DISTURBED), build
         #    tracks without checking for strokes yet.
         if self._reacq_remaining > 0:
@@ -299,12 +291,19 @@ class GameTracker:
             if self._reacq_remaining == 0:
                 current_snapshot = self._emit_confirmed()
                 self._check_for_stroke(current_snapshot, self._pre_disturb_pos)
-            return list(self._confirmed_balls)
 
+        self._confirmed_balls = self._emit_confirmed()
         return list(self._confirmed_balls)
 
-    def _tick_disturbed(self, frame: np.ndarray) -> List[Dict]:
-        """DISTURBED: freeze output, monitor for calm."""
+    def _tick_disturbed(self, frame: np.ndarray, raw_balls: List[Dict]) -> List[Dict]:
+        """DISTURBED: freeze output, monitor for calm.
+
+        When cue_ball_pocketed is True we continue tracking so that white
+        can be found before the DISTURBED cycle resolves.
+        """
+        if self.cue_ball_pocketed and raw_balls:
+            self._do_tracking(raw_balls, create_new=True)
+
         has_motion = self._check_motion(frame)
 
         if has_motion:
@@ -330,6 +329,10 @@ class GameTracker:
         """Compare *current_snapshot* to *reference_pos* and register a stroke
         if any ball moved significantly or was pocketed."""
         current_pos = _extract_positions(current_snapshot)
+        # Scratch-return: cue was pocketed before, white is now confirmed back.
+        if self.cue_ball_pocketed and 'white' in current_pos:
+            self._register_stroke(current_snapshot, current_pos)
+            return
         if not reference_pos:
             return
         if _any_ball_moved(reference_pos, current_pos, SHOT_THRESHOLD_CM) or \
