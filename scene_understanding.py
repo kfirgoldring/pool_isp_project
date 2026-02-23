@@ -131,20 +131,17 @@ def compute_homography_from_corners(corners: np.ndarray) -> np.ndarray:
 
 
 # Utility function to show the histogram of the Hue channel
-def show_hue_histogram():
+def show_hue_histogram(image_path: str):
     """
     Loads an image, converts it to HSV, and displays the histogram of the Hue channel.
     Helps to determine the range of green values for thresholding.
     """
-    image_path = r'table_pics\\table\\new_cam_in_lib_ref.jpeg'
     img = cv2.imread(image_path)
     if img is None:
         print(f"Failed to load image: {image_path}")
         return
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     hue = hsv[:, :, 0]
-    saturation = hsv[:, :, 1]
-    value = hsv[:, :, 2]
     plt.figure(figsize=(8, 4))
     plt.hist(hue.ravel(), bins=180, range=[0, 180], color='g', alpha=0.7)
     plt.title('Hue Channel Histogram')
@@ -325,8 +322,14 @@ def get_table_corners(image):
 
 
 def main():
-    image_path = r'table_pics\\table\\new_cam_in_lib_ref.jpeg'
-    image = cv2.imread(image_path)
+    import sys
+    if len(sys.argv) < 2:
+        print("Usage: python scene_understanding.py <image_path>")
+        sys.exit(1)
+    image = cv2.imread(sys.argv[1])
+    if image is None:
+        print(f"Failed to load image: {sys.argv[1]}")
+        sys.exit(1)
     get_table_corners(image)
 
 if __name__ == "__main__":

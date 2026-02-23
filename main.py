@@ -32,12 +32,12 @@ from trajectory import suggest_best_shot
 # detect_balls_with_color(frame_bgr, table_corners, ref_path, ...) → np.ndarray (N,3)
 # Each row: [x_cam_px, y_cam_px, color_str]
 try:
-    from Ball_Detection import detect_balls_with_color as _detect_balls_with_color
+    from ball_detection import detect_balls_with_color as _detect_balls_with_color
     DETECTION_AVAILABLE = True
-    print('[main] Ball_Detection module loaded.')
+    print('[main] ball_detection module loaded.')
 except (ImportError, AttributeError) as _e:
     DETECTION_AVAILABLE = False
-    print(f'[main] Ball_Detection not available ({_e}); using mock detection.')
+    print(f'[main] ball_detection not available ({_e}).')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -126,17 +126,11 @@ def _run_tick(window, gt: GameTracker) -> None:
     if frame is None:
         return
 
-    # Run detection only when the state machine needs it
     raw_balls: List[Dict] = []
-    if window.use_mock:
+    if gt.needs_detection:
         raw_balls = _detect_balls(
             frame, window.cam_H, window.table_corners,
-            window.ref_path, True,
-        )
-    elif gt.needs_detection:
-        raw_balls = _detect_balls(
-            frame, window.cam_H, window.table_corners,
-            window.ref_path, False,
+            window.ref_path,
         )
 
     balls = gt.update(frame, raw_balls)
@@ -180,7 +174,7 @@ def _run_tick(window, gt: GameTracker) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Ball detection  (adapter between Ball_Detection.py output and internal format)
+# Ball detection  (adapter between ball_detection.py output and internal format)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _detect_balls(
@@ -188,13 +182,9 @@ def _detect_balls(
     cam_H:         Optional[np.ndarray],
     table_corners: Optional[np.ndarray],
     ref_path:      Optional[str] = None,
-    use_mock:      bool = False,
 ) -> List[Dict]:
     """
     Run ball detection and convert to internal dict format.
-
-    Returns only actually-detected balls.  Mock balls are generated only
-    when ``use_mock`` is True (user selected "no camera" in setup).
 
     Returns list of dicts:
         {
@@ -217,10 +207,6 @@ def _detect_balls(
                 return _adapt_detections(raw, cam_H)
         except Exception as exc:
             print(f'[main] Detection error: {exc}')
-        return []
-
-    if use_mock:
-        return _mock_detect_balls(frame, cam_H)
 
     return []
 
@@ -255,43 +241,7 @@ def _adapt_detections(
             'center_cm': center_cm,
             'color':     color,
             'is_cue':    color == 'white',
-            'radius':    18,   # Ball_Detection doesn't expose per-ball radius
-        })
-    return balls
-
-
-def _mock_detect_balls(
-    frame: np.ndarray,
-    cam_H: Optional[np.ndarray],
-) -> List[Dict]:
-    """
-    Generate mock ball positions for demo / testing when Ball_Detection is
-    unavailable or when table corners have not been calibrated yet.
-    Positions are fixed fractions of the frame size.
-    """
-    h, w = frame.shape[:2]
-    raw_positions = [
-        (0.50, 0.50, 'white',    True),
-        (0.35, 0.38, 'orange',   False),
-        (0.65, 0.33, 'yellow',   False),
-        (0.28, 0.62, 'blue',     False),
-        (0.72, 0.60, 'bordeaux', False),
-    ]
-    balls: List[Dict] = []
-    for fx, fy, color, is_cue in raw_positions:
-        px = int(w * fx)
-        py = int(h * fy)
-        center_cm: Optional[Tuple[float, float]] = None
-        if cam_H is not None:
-            pt        = np.array([[[float(px), float(py)]], ], dtype=np.float32)
-            t         = cv2.perspectiveTransform(pt, cam_H)
-            center_cm = (float(t[0][0][0]), float(t[0][0][1]))
-        balls.append({
-            'center':    (px, py),
-            'center_cm': center_cm,
-            'color':     color,
-            'is_cue':    is_cue,
-            'radius':    18,
+            'radius':    18,   # ball_detection doesn't expose per-ball radius
         })
     return balls
 

@@ -35,7 +35,7 @@ import config
 
 # ── Optional module imports (graceful fallback) ───────────────────────────────
 try:
-    from Scene_Understanding import (
+    from scene_understanding import (
         get_table_corners,
         compute_homography_from_corners,
     )
@@ -68,6 +68,18 @@ _REF_CACHE  = str(_CACHE_DIR / 'ref.jpeg')
 # Top-down (bird's-eye) view — 8 px/cm → 122×61 cm → 976×488 px canvas
 TABLE_DISPLAY_SCALE  = 8
 BALL_RADIUS_TOP_DOWN = 16   # slightly smaller than actual ball size for cleaner overlay
+
+# Golf Mode — fixed starting positions per ball color (table cm, origin = top-left corner)
+# Symmetric layout: cluster anchored at x=27; white mirrors at x=122-27=95; spacing=10 cm
+GOLF_MODE_STARTING_POSITIONS: Dict[str, Tuple[float, float]] = {
+    'blue':     (27.0, 20.5),   # 10 cm above centre
+    'yellow':   (27.0, 30.5),   # centre height
+    'purple':   (37.0, 30.5),   # 10 cm right of yellow
+    'bordeaux': (27.0, 40.5),   # 10 cm below centre
+    'white':    (95.0, 30.5),   # mirror x, centre height
+}
+BALL_IN_POSITION_THRESHOLD_CM: float = 3.0   # cm radius to count as "in position"
+PLACEMENT_RING_OFFSET: int = 8               # ring radius = ball_r + this
 
 # Billiards ball color name → OpenCV BGR
 BALL_COLORS_BGR: Dict[str, Tuple[int, int, int]] = {
@@ -393,17 +405,6 @@ class SetupPage(QWidget):
         cam_layout.addLayout(idx_row)
         outer.addWidget(cam_group)
 
-        self._lbl_mock = QLabel('(No hardware selected — will run in mock/demo mode)')
-        self._lbl_mock.setAlignment(Qt.AlignCenter)
-        self._lbl_mock.setStyleSheet("""
-            color: #8a7d68;
-            font-family: 'Lora', Georgia, serif;
-            font-style: italic;
-            font-size: 11px;
-        """)
-        self._lbl_mock.setVisible(False)
-        outer.addWidget(self._lbl_mock)
-
         outer.addStretch()
 
         self._btn_start = QPushButton('Start  →')
@@ -426,7 +427,6 @@ class SetupPage(QWidget):
 
     def _on_camera_toggled(self, checked: bool):
         self._spin_camera.setEnabled(checked)
-        self._lbl_mock.setVisible(not checked)
 
     def _on_start(self):
         self.start_requested.emit(
@@ -826,7 +826,7 @@ class CalibrationPage(QWidget):
 
     @staticmethod
     def _compute_homography_fallback(corners: np.ndarray) -> np.ndarray:
-        """Compute camera->table_cm homography without Scene_Understanding."""
+        """Compute camera->table_cm homography without scene_understanding."""
         src = corners.reshape(4, 2).astype(np.float32)
         dst = np.array([
             [0.0,                    0.0],
@@ -1270,7 +1270,6 @@ class BilliardsApp(QMainWindow):
 
         # ── Hardware ─────────────────────────────────────────────────────────
         self.camera_index    : int  = config.CAMERA_INDEX
-        self.use_mock        : bool = False
 
         # ── Rendering state ──────────────────────────────────────────────────
         self.paused    = False
@@ -1322,7 +1321,6 @@ class BilliardsApp(QMainWindow):
     def grab_frame(self) -> Optional[np.ndarray]:
         """
         Return the latest raw camera frame (BGR ndarray).
-        Handles mock mode and paused state.
         Does NOT apply any warp — returns camera-pixel-space frame.
         """
         if not self.paused:
@@ -1427,6 +1425,28 @@ class BilliardsApp(QMainWindow):
         if len(cue_path_px) >= 2 and selected_color is not None:
             ghost = cue_path_px[-1]
             cv2.circle(canvas, ghost, ball_r, COLOR_PATH, 2, cv2.LINE_AA)
+
+        # 3b. Placement target rings (top-down mode only)
+        if top_down:
+            from game_tracker import ST_WAITING_FOR_BALLS as _ST_WAIT
+            game_obj     = getattr(self, 'game', None)
+            cue_pocketed = getattr(game_obj, 'cue_ball_pocketed', False)
+            ring_r       = ball_r + PLACEMENT_RING_OFFSET
+
+            if game_state == _ST_WAIT:
+                # Pre-game: show all 5 placement rings
+                for color, target_cm in GOLF_MODE_STARTING_POSITIONS.items():
+                    ctr = cm_to_disp(target_cm)
+                    if ctr is not None:
+                        self._draw_placement_ring(
+                            canvas, ctr, ring_r,
+                            BALL_COLORS_BGR.get(color, BALL_COLORS_BGR['gray']),
+                        )
+            elif cue_pocketed:
+                # Scratch recovery: show white return ring only
+                ctr = cm_to_disp(GOLF_MODE_STARTING_POSITIONS['white'])
+                if ctr is not None:
+                    self._draw_placement_ring(canvas, ctr, ring_r, BALL_COLORS_BGR['white'])
 
         # 4. Detected balls
         for ball in balls_disp:
@@ -1754,22 +1774,17 @@ class BilliardsApp(QMainWindow):
 
     def _on_setup_done(self, camera_index: int, has_camera: bool):
         self.camera_index = camera_index
-        self.use_mock     = not has_camera
 
         if not has_camera:
-            # Mock mode — skip calibration entirely
             self._on_calibration_done(None)
             return
 
-        # Switch to calibration page immediately (non-blocking) and show
-        # the loading bar while the camera opens in a background thread.
         self._stack.setCurrentIndex(1)   # → CalibrationPage
         self.setMinimumSize(800, 620)
         self.statusBar().showMessage('Opening camera\u2026')
         self._calib_page.start_loading_animation()
 
-        # Open camera in background thread so the UI stays responsive
-        self._cam_thread = CameraOpenThread(camera_index)   # keep ref → no GC
+        self._cam_thread = CameraOpenThread(camera_index)
         self._cam_thread.opened.connect(self._on_camera_opened)
         self._cam_thread.start()
 
@@ -1777,9 +1792,8 @@ class BilliardsApp(QMainWindow):
         """Slot called from CameraOpenThread when camera open attempt completes."""
         self._calib_page.stop_loading_animation()
         if cap is None:
-            print(f'[GUI] Cannot open camera {self.camera_index}. Falling back to mock.')
+            print(f'[GUI] Cannot open camera {self.camera_index}.')
             self._cap = None
-            self.use_mock = True
             self._on_calibration_done(None)
             return
         self._cap = cap
@@ -1792,7 +1806,7 @@ class BilliardsApp(QMainWindow):
         # Camera is already open and calibration already done — go straight to main.
         self._stack.setCurrentIndex(3)   # → Main view
         self.setMinimumSize(900, 680)
-        self._start_camera()    # validates cap; no-op if mock
+        self._start_camera()
         self._start_timer()
         calib_str = 'OK' if self.cam_H is not None else 'none'
         self.lbl_mode_calib.setText(f'Calib: {calib_str}')
@@ -1841,8 +1855,7 @@ class BilliardsApp(QMainWindow):
         self._table_corners = None
 
         if self._cap is None or not self._cap.isOpened():
-            print('[GUI] Camera unavailable during recalibration — falling back to mock.')
-            self.use_mock = True
+            print('[GUI] Camera unavailable during recalibration.')
             self._calib_page.accepted_corners = None
             self._on_calibration_done(None)
             return
@@ -1882,7 +1895,6 @@ class BilliardsApp(QMainWindow):
         self._table_corners = None
 
         if self._cap is None or not self._cap.isOpened():
-            self.use_mock = True
             self._on_calibration_done(None)
             return
 
@@ -1898,12 +1910,8 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _start_camera(self):
-        if self.use_mock:
-            print('[GUI] Mock mode — no camera opened.')
-            return
         if self._cap is None or not self._cap.isOpened():
-            print('[GUI] WARNING: Camera not available. Falling back to mock.')
-            self.use_mock = True
+            print('[GUI] WARNING: Camera not available.')
 
     def _start_timer(self):
         self._timer = QTimer(self)
@@ -1951,8 +1959,6 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _grab_frame(self) -> Optional[np.ndarray]:
-        if self.use_mock:
-            return _make_mock_frame()
         if self._cap is None or not self._cap.isOpened():
             return None
         ok, frame = self._cap.read()
@@ -2049,6 +2055,10 @@ class BilliardsApp(QMainWindow):
             cv2.circle(canvas, center, max(3, radius // 4), (200, 200, 200), -1)
         if selected:
             cv2.circle(canvas, center, radius + 6, COLOR_SELECTION, 3)
+
+    def _draw_placement_ring(self, canvas, center, radius, color_bgr, thickness=3):
+        """Draw a hollow target ring indicating where a ball should be placed."""
+        cv2.circle(canvas, center, radius, color_bgr, thickness, cv2.LINE_AA)
 
     def _draw_pocket(self, canvas, center, selected=False, radius=10):
         x, y = center
@@ -2296,6 +2306,22 @@ class BilliardsApp(QMainWindow):
             'Enable Homography' if self._raw_view else 'Disable Homography'
         )
 
+    def _all_balls_in_position(self, balls: List[Dict]) -> bool:
+        """True when every Golf Mode target has the correct ball within threshold."""
+        for color, target_cm in GOLF_MODE_STARTING_POSITIONS.items():
+            match = next(
+                (b for b in balls
+                 if b.get('color') == color and b.get('center_cm') is not None),
+                None,
+            )
+            if match is None:
+                return False
+            dx = match['center_cm'][0] - target_cm[0]
+            dy = match['center_cm'][1] - target_cm[1]
+            if (dx * dx + dy * dy) ** 0.5 > BALL_IN_POSITION_THRESHOLD_CM:
+                return False
+        return True
+
     # ─────────────────────────────────────────────────────────────────────────
     # Sidebar status update
     # ─────────────────────────────────────────────────────────────────────────
@@ -2358,7 +2384,7 @@ class BilliardsApp(QMainWindow):
             self.btn_start_game.setEnabled(True)
         else:
             self.btn_start_game.setText('Start Game')
-            can_start = len(balls) == 5
+            can_start = self._all_balls_in_position(balls)
             self.btn_start_game.setEnabled(can_start)
             self.btn_start_game.setStyleSheet(_BTN_PRIMARY_SS if can_start else _BTN_DISABLED_SS)
 
@@ -2498,13 +2524,6 @@ def _bgr_to_pixmap(frame: np.ndarray) -> QPixmap:
     h, w = rgb.shape[:2]
     qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888)
     return QPixmap.fromImage(qimg)
-
-
-def _make_mock_frame(width: int = 640, height: int = 480) -> np.ndarray:
-    """Synthetic green-felt background for mock mode."""
-    frame = np.full((height, width, 3), (34, 100, 34), dtype=np.uint8)
-    noise = np.random.randint(-10, 10, frame.shape, dtype=np.int16)
-    return np.clip(frame.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

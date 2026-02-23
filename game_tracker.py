@@ -137,7 +137,7 @@ class GameTracker:
 
     @property
     def needs_detection(self) -> bool:
-        """True when the caller should run Ball_Detection this tick.
+        """True when the caller should run ball_detection this tick.
 
         WAITING_FOR_BALLS: every tick (need to find balls ASAP).
         TRACKING (re-acquiring): every tick (need fresh data).
@@ -146,6 +146,8 @@ class GameTracker:
         """
         if self.state == ST_WAITING_FOR_BALLS:
             return True
+        if self.state == ST_TRACKING and self.cue_ball_pocketed:
+            return True   # actively search for white every tick until it returns
         if self.state == ST_TRACKING:
             if self._reacq_remaining > 0:
                 return True
@@ -231,7 +233,7 @@ class GameTracker:
         Parameters
         ----------
         frame     : current camera frame (always provided).
-        raw_balls : detections from Ball_Detection, or ``[]`` when detection
+        raw_balls : detections from ball_detection, or ``[]`` when detection
                     was skipped (DISTURBED / GAME_OVER).
         """
         self._tick_count += 1
@@ -279,6 +281,16 @@ class GameTracker:
         # 2. Feed detections into EMA tracker
         if raw_balls:
             self._do_tracking(raw_balls, create_new=True)
+
+        # 2b. Clear scratch-recovery flag once white is stably back on the table
+        if self.cue_ball_pocketed:
+            white_back = next(
+                (t for t in self._tracks
+                 if t.get('is_cue') and t['stale'] == 0 and t['age'] >= self._confirm_frames),
+                None,
+            )
+            if white_back is not None:
+                self.cue_ball_pocketed = False
 
         # 3. During re-acquisition (just returned from DISTURBED), build
         #    tracks without checking for strokes yet.

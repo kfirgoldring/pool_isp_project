@@ -1,5 +1,5 @@
 """
-Physics_Engine.py — Pure geometry helpers for billiards shot planning.
+physics_engine.py — Pure geometry helpers for billiards shot planning.
 No state, no GUI, no OpenCV, no Qt.
 All coordinates are in table centimetres (origin = top-left pocket).
 """
