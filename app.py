@@ -1426,26 +1426,27 @@ class BilliardsApp(QMainWindow):
             ghost = cue_path_px[-1]
             cv2.circle(canvas, ghost, ball_r, COLOR_PATH, 2, cv2.LINE_AA)
 
-        # 3b. Placement target rings (visible in both top-down and raw view)
-        from game_tracker import ST_WAITING_FOR_BALLS as _ST_WAIT
-        game_obj     = getattr(self, 'game', None)
-        cue_pocketed = getattr(game_obj, 'cue_ball_pocketed', False)
-        ring_r       = ball_r + PLACEMENT_RING_OFFSET
+        # 3b. Placement target rings (top-down mode only)
+        if top_down:
+            from game_tracker import ST_WAITING_FOR_BALLS as _ST_WAIT
+            game_obj     = getattr(self, 'game', None)
+            cue_pocketed = getattr(game_obj, 'cue_ball_pocketed', False)
+            ring_r       = ball_r + PLACEMENT_RING_OFFSET
 
-        if game_state == _ST_WAIT:
-            # Pre-game: show all 5 placement rings
-            for color, target_cm in GOLF_MODE_STARTING_POSITIONS.items():
-                ctr = cm_to_disp(target_cm)
+            if game_state == _ST_WAIT:
+                # Pre-game: show all 5 placement rings
+                for color, target_cm in GOLF_MODE_STARTING_POSITIONS.items():
+                    ctr = cm_to_disp(target_cm)
+                    if ctr is not None:
+                        self._draw_placement_ring(
+                            canvas, ctr, ring_r,
+                            BALL_COLORS_BGR.get(color, BALL_COLORS_BGR['gray']),
+                        )
+            elif cue_pocketed:
+                # Scratch recovery: show white return ring only
+                ctr = cm_to_disp(GOLF_MODE_STARTING_POSITIONS['white'])
                 if ctr is not None:
-                    self._draw_placement_ring(
-                        canvas, ctr, ring_r,
-                        BALL_COLORS_BGR.get(color, BALL_COLORS_BGR['gray']),
-                    )
-        elif cue_pocketed:
-            # Scratch recovery: show white return ring only
-            ctr = cm_to_disp(GOLF_MODE_STARTING_POSITIONS['white'])
-            if ctr is not None:
-                self._draw_placement_ring(canvas, ctr, ring_r, BALL_COLORS_BGR['white'])
+                    self._draw_placement_ring(canvas, ctr, ring_r, BALL_COLORS_BGR['white'])
 
         # 4. Detected balls
         for ball in balls_disp:
@@ -2257,7 +2258,7 @@ class BilliardsApp(QMainWindow):
             return
 
         self.paused = False
-        game.start_game(colored, balls, cue_ref_pos=GOLF_MODE_STARTING_POSITIONS.get('white'))
+        game.start_game(colored, balls)
         self.lbl_game_msg.setText('Game started!')
         self.lbl_stroke_num.setText('0')
         self.lbl_remaining_num.setText(str(len(colored)))

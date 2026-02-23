@@ -132,8 +132,6 @@ class GameTracker:
 
         # Tick counter for detection throttling
         self._tick_count: int = 0
-        self._cue_ref_pos: Optional[Tuple[float, float]] = None
-        self._last_known_cue_pos: Optional[Tuple[float, float]] = None
 
     # ── Public properties ────────────────────────────────────────────────────
 
@@ -164,7 +162,6 @@ class GameTracker:
         self,
         colored_ball_colors: List[str],
         initial_balls: List[Dict],
-        cue_ref_pos: Optional[Tuple[float, float]] = None,
     ) -> None:
         """Transition WAITING_FOR_BALLS -> TRACKING.
 
@@ -185,8 +182,6 @@ class GameTracker:
         self._calm_count = 0
         self._reacq_remaining = 0
         self._tick_count = 0
-        self._cue_ref_pos = cue_ref_pos
-        self._last_known_cue_pos = None
 
     def reset(self) -> None:
         """Return to WAITING_FOR_BALLS and clear all game state."""
@@ -204,8 +199,6 @@ class GameTracker:
         self._calm_count = 0
         self._reacq_remaining = 0
         self._tick_count = 0
-        self._cue_ref_pos = None
-        self._last_known_cue_pos = None
 
     # ── Target / ball lookup helpers ─────────────────────────────────────────
 
@@ -338,24 +331,6 @@ class GameTracker:
         current_pos = _extract_positions(current_snapshot)
         # Scratch-return: cue was pocketed before, white is now confirmed back.
         if self.cue_ball_pocketed and 'white' in current_pos:
-            cx, cy = current_pos['white']
-
-            # 1. False Alarm Check: If ball reappears roughly where it vanished,
-            #    it wasn't pocketed (probably hand obstruction). Undo penalty.
-            if self._last_known_cue_pos is not None:
-                lx, ly = self._last_known_cue_pos
-                dist_last = ((cx - lx) ** 2 + (cy - ly) ** 2) ** 0.5
-                if dist_last < 5.0:  # 5 cm tolerance for "same spot"
-                    self.stroke_count -= CUE_BALL_PENALTY
-                    self._register_stroke(current_snapshot, current_pos) # Update pos, clear flag
-                    return
-
-            # Ensure placement is close to where it was before the scratch
-            if self._cue_ref_pos is not None:
-                rx, ry = self._cue_ref_pos
-                dist = ((cx - rx) ** 2 + (cy - ry) ** 2) ** 0.5
-                if dist > 3.0:  # 3 cm tolerance
-                    return
             self._register_stroke(current_snapshot, current_pos)
             return
         if not reference_pos:
@@ -378,8 +353,6 @@ class GameTracker:
         if 'white' in self._confirmed_pos and 'white' not in new_pos:
             self.cue_ball_pocketed = True
             self.stroke_count += CUE_BALL_PENALTY
-            # Save where we last saw it, to detect false alarms later
-            self._last_known_cue_pos = self._confirmed_pos['white']
 
         for color in list(self._confirmed_pos.keys()):
             if color == 'white':
