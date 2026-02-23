@@ -1306,6 +1306,7 @@ class BilliardsApp(QMainWindow):
         self._last_game_state   : str       = 'WAITING_FOR_BALLS'
         self._last_selected_color: Optional[str] = None
         self._last_cue_present  : bool      = True   # False when cue ball leaves table
+        self._render_tick       : int       = 0      # drives pulsing animation
 
         # ── Player / leaderboard state ───────────────────────────────────────
         self._current_player_name: str  = ''
@@ -1369,6 +1370,7 @@ class BilliardsApp(QMainWindow):
         """
         top_down = self.cam_H is not None
         S = TABLE_DISPLAY_SCALE
+        self._render_tick += 1
 
         # Cache game state for status panel
         self._last_stroke_count  = stroke_count
@@ -1443,10 +1445,24 @@ class BilliardsApp(QMainWindow):
                             BALL_COLORS_BGR.get(color, BALL_COLORS_BGR['gray']),
                         )
             elif cue_pocketed:
-                # Scratch recovery: show white return ring only
+                # Scratch recovery: show a pulsing double-ring so the player
+                # can clearly distinguish it from the static pre-game rings.
                 ctr = cm_to_disp(GOLF_MODE_STARTING_POSITIONS['white'])
                 if ctr is not None:
-                    self._draw_placement_ring(canvas, ctr, ring_r, BALL_COLORS_BGR['white'])
+                    import math
+                    # Outer ring — fixed, bright white
+                    cv2.circle(canvas, ctr, ring_r + 4,
+                               BALL_COLORS_BGR['white'], 3, cv2.LINE_AA)
+                    # Inner pulsing ring — oscillates ±4 px, orange tint
+                    pulse = int(4 * math.sin(self._render_tick * 0.25))
+                    cv2.circle(canvas, ctr, max(2, ring_r - 4 + pulse),
+                               (0, 120, 255), 2, cv2.LINE_AA)
+                    # Small cross-hair at centre
+                    cx, cy = ctr
+                    cv2.line(canvas, (cx - 6, cy), (cx + 6, cy),
+                             BALL_COLORS_BGR['white'], 1, cv2.LINE_AA)
+                    cv2.line(canvas, (cx, cy - 6), (cx, cy + 6),
+                             BALL_COLORS_BGR['white'], 1, cv2.LINE_AA)
 
         # 4. Detected balls
         for ball in balls_disp:
