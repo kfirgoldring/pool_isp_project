@@ -69,6 +69,18 @@ _REF_CACHE  = str(_CACHE_DIR / 'ref.jpeg')
 TABLE_DISPLAY_SCALE  = 8
 BALL_RADIUS_TOP_DOWN = 16   # slightly smaller than actual ball size for cleaner overlay
 
+# Golf Mode — fixed starting positions per ball color (table cm, origin = top-left corner)
+# Symmetric layout: cluster anchored at x=27; white mirrors at x=122-27=95; spacing=10 cm
+GOLF_MODE_STARTING_POSITIONS: Dict[str, Tuple[float, float]] = {
+    'blue':     (27.0, 20.5),   # 10 cm above centre
+    'yellow':   (27.0, 30.5),   # centre height
+    'purple':   (37.0, 30.5),   # 10 cm right of yellow
+    'bordeaux': (27.0, 40.5),   # 10 cm below centre
+    'white':    (95.0, 30.5),   # mirror x, centre height
+}
+BALL_IN_POSITION_THRESHOLD_CM: float = 3.0   # cm radius to count as "in position"
+PLACEMENT_RING_OFFSET: int = 8               # ring radius = ball_r + this
+
 # Billiards ball color name → OpenCV BGR
 BALL_COLORS_BGR: Dict[str, Tuple[int, int, int]] = {
     'white':    (255, 255, 255),
@@ -1428,6 +1440,28 @@ class BilliardsApp(QMainWindow):
             ghost = cue_path_px[-1]
             cv2.circle(canvas, ghost, ball_r, COLOR_PATH, 2, cv2.LINE_AA)
 
+        # 3b. Placement target rings (top-down mode only)
+        if top_down:
+            from game_tracker import ST_WAITING_FOR_BALLS as _ST_WAIT
+            game_obj     = getattr(self, 'game', None)
+            cue_pocketed = getattr(game_obj, 'cue_ball_pocketed', False)
+            ring_r       = ball_r + PLACEMENT_RING_OFFSET
+
+            if game_state == _ST_WAIT:
+                # Pre-game: show all 5 placement rings
+                for color, target_cm in GOLF_MODE_STARTING_POSITIONS.items():
+                    ctr = cm_to_disp(target_cm)
+                    if ctr is not None:
+                        self._draw_placement_ring(
+                            canvas, ctr, ring_r,
+                            BALL_COLORS_BGR.get(color, BALL_COLORS_BGR['gray']),
+                        )
+            elif cue_pocketed:
+                # Scratch recovery: show white return ring only
+                ctr = cm_to_disp(GOLF_MODE_STARTING_POSITIONS['white'])
+                if ctr is not None:
+                    self._draw_placement_ring(canvas, ctr, ring_r, BALL_COLORS_BGR['white'])
+
         # 4. Detected balls
         for ball in balls_disp:
             disp = ball.get('_disp')
@@ -2050,6 +2084,10 @@ class BilliardsApp(QMainWindow):
         if selected:
             cv2.circle(canvas, center, radius + 6, COLOR_SELECTION, 3)
 
+    def _draw_placement_ring(self, canvas, center, radius, color_bgr, thickness=3):
+        """Draw a hollow target ring indicating where a ball should be placed."""
+        cv2.circle(canvas, center, radius, color_bgr, thickness, cv2.LINE_AA)
+
     def _draw_pocket(self, canvas, center, selected=False, radius=10):
         x, y = center
         r    = radius
@@ -2296,6 +2334,22 @@ class BilliardsApp(QMainWindow):
             'Enable Homography' if self._raw_view else 'Disable Homography'
         )
 
+    def _all_balls_in_position(self, balls: List[Dict]) -> bool:
+        """True when every Golf Mode target has the correct ball within threshold."""
+        for color, target_cm in GOLF_MODE_STARTING_POSITIONS.items():
+            match = next(
+                (b for b in balls
+                 if b.get('color') == color and b.get('center_cm') is not None),
+                None,
+            )
+            if match is None:
+                return False
+            dx = match['center_cm'][0] - target_cm[0]
+            dy = match['center_cm'][1] - target_cm[1]
+            if (dx * dx + dy * dy) ** 0.5 > BALL_IN_POSITION_THRESHOLD_CM:
+                return False
+        return True
+
     # ─────────────────────────────────────────────────────────────────────────
     # Sidebar status update
     # ─────────────────────────────────────────────────────────────────────────
@@ -2358,7 +2412,7 @@ class BilliardsApp(QMainWindow):
             self.btn_start_game.setEnabled(True)
         else:
             self.btn_start_game.setText('Start Game')
-            can_start = len(balls) == 5
+            can_start = self._all_balls_in_position(balls)
             self.btn_start_game.setEnabled(can_start)
             self.btn_start_game.setStyleSheet(_BTN_PRIMARY_SS if can_start else _BTN_DISABLED_SS)
 
