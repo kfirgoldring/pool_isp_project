@@ -137,7 +137,7 @@ class GameTracker:
 
     @property
     def needs_detection(self) -> bool:
-        """True when the caller should run Ball_Detection this tick.
+        """True when the caller should run ball_detection this tick.
 
         WAITING_FOR_BALLS: every tick (need to find balls ASAP).
         TRACKING (re-acquiring): every tick (need fresh data).
@@ -233,7 +233,7 @@ class GameTracker:
         Parameters
         ----------
         frame     : current camera frame (always provided).
-        raw_balls : detections from Ball_Detection, or ``[]`` when detection
+        raw_balls : detections from ball_detection, or ``[]`` when detection
                     was skipped (DISTURBED / GAME_OVER).
         """
         self._tick_count += 1

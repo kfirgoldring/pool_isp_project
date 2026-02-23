@@ -35,7 +35,7 @@ import config
 
 # ── Optional module imports (graceful fallback) ───────────────────────────────
 try:
-    from Scene_Understanding import (
+    from scene_understanding import (
         get_table_corners,
         compute_homography_from_corners,
     )
@@ -405,17 +405,6 @@ class SetupPage(QWidget):
         cam_layout.addLayout(idx_row)
         outer.addWidget(cam_group)
 
-        self._lbl_mock = QLabel('(No hardware selected — will run in mock/demo mode)')
-        self._lbl_mock.setAlignment(Qt.AlignCenter)
-        self._lbl_mock.setStyleSheet("""
-            color: #8a7d68;
-            font-family: 'Lora', Georgia, serif;
-            font-style: italic;
-            font-size: 11px;
-        """)
-        self._lbl_mock.setVisible(False)
-        outer.addWidget(self._lbl_mock)
-
         outer.addStretch()
 
         self._btn_start = QPushButton('Start  →')
@@ -438,7 +427,6 @@ class SetupPage(QWidget):
 
     def _on_camera_toggled(self, checked: bool):
         self._spin_camera.setEnabled(checked)
-        self._lbl_mock.setVisible(not checked)
 
     def _on_start(self):
         self.start_requested.emit(
@@ -838,7 +826,7 @@ class CalibrationPage(QWidget):
 
     @staticmethod
     def _compute_homography_fallback(corners: np.ndarray) -> np.ndarray:
-        """Compute camera->table_cm homography without Scene_Understanding."""
+        """Compute camera->table_cm homography without scene_understanding."""
         src = corners.reshape(4, 2).astype(np.float32)
         dst = np.array([
             [0.0,                    0.0],
@@ -1282,7 +1270,6 @@ class BilliardsApp(QMainWindow):
 
         # ── Hardware ─────────────────────────────────────────────────────────
         self.camera_index    : int  = config.CAMERA_INDEX
-        self.use_mock        : bool = False
 
         # ── Rendering state ──────────────────────────────────────────────────
         self.paused    = False
@@ -1334,7 +1321,6 @@ class BilliardsApp(QMainWindow):
     def grab_frame(self) -> Optional[np.ndarray]:
         """
         Return the latest raw camera frame (BGR ndarray).
-        Handles mock mode and paused state.
         Does NOT apply any warp — returns camera-pixel-space frame.
         """
         if not self.paused:
@@ -1788,22 +1774,17 @@ class BilliardsApp(QMainWindow):
 
     def _on_setup_done(self, camera_index: int, has_camera: bool):
         self.camera_index = camera_index
-        self.use_mock     = not has_camera
 
         if not has_camera:
-            # Mock mode — skip calibration entirely
             self._on_calibration_done(None)
             return
 
-        # Switch to calibration page immediately (non-blocking) and show
-        # the loading bar while the camera opens in a background thread.
         self._stack.setCurrentIndex(1)   # → CalibrationPage
         self.setMinimumSize(800, 620)
         self.statusBar().showMessage('Opening camera\u2026')
         self._calib_page.start_loading_animation()
 
-        # Open camera in background thread so the UI stays responsive
-        self._cam_thread = CameraOpenThread(camera_index)   # keep ref → no GC
+        self._cam_thread = CameraOpenThread(camera_index)
         self._cam_thread.opened.connect(self._on_camera_opened)
         self._cam_thread.start()
 
@@ -1811,9 +1792,8 @@ class BilliardsApp(QMainWindow):
         """Slot called from CameraOpenThread when camera open attempt completes."""
         self._calib_page.stop_loading_animation()
         if cap is None:
-            print(f'[GUI] Cannot open camera {self.camera_index}. Falling back to mock.')
+            print(f'[GUI] Cannot open camera {self.camera_index}.')
             self._cap = None
-            self.use_mock = True
             self._on_calibration_done(None)
             return
         self._cap = cap
@@ -1826,7 +1806,7 @@ class BilliardsApp(QMainWindow):
         # Camera is already open and calibration already done — go straight to main.
         self._stack.setCurrentIndex(3)   # → Main view
         self.setMinimumSize(900, 680)
-        self._start_camera()    # validates cap; no-op if mock
+        self._start_camera()
         self._start_timer()
         calib_str = 'OK' if self.cam_H is not None else 'none'
         self.lbl_mode_calib.setText(f'Calib: {calib_str}')
@@ -1875,8 +1855,7 @@ class BilliardsApp(QMainWindow):
         self._table_corners = None
 
         if self._cap is None or not self._cap.isOpened():
-            print('[GUI] Camera unavailable during recalibration — falling back to mock.')
-            self.use_mock = True
+            print('[GUI] Camera unavailable during recalibration.')
             self._calib_page.accepted_corners = None
             self._on_calibration_done(None)
             return
@@ -1916,7 +1895,6 @@ class BilliardsApp(QMainWindow):
         self._table_corners = None
 
         if self._cap is None or not self._cap.isOpened():
-            self.use_mock = True
             self._on_calibration_done(None)
             return
 
@@ -1932,12 +1910,8 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _start_camera(self):
-        if self.use_mock:
-            print('[GUI] Mock mode — no camera opened.')
-            return
         if self._cap is None or not self._cap.isOpened():
-            print('[GUI] WARNING: Camera not available. Falling back to mock.')
-            self.use_mock = True
+            print('[GUI] WARNING: Camera not available.')
 
     def _start_timer(self):
         self._timer = QTimer(self)
@@ -1985,8 +1959,6 @@ class BilliardsApp(QMainWindow):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _grab_frame(self) -> Optional[np.ndarray]:
-        if self.use_mock:
-            return _make_mock_frame()
         if self._cap is None or not self._cap.isOpened():
             return None
         ok, frame = self._cap.read()
@@ -2552,13 +2524,6 @@ def _bgr_to_pixmap(frame: np.ndarray) -> QPixmap:
     h, w = rgb.shape[:2]
     qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888)
     return QPixmap.fromImage(qimg)
-
-
-def _make_mock_frame(width: int = 640, height: int = 480) -> np.ndarray:
-    """Synthetic green-felt background for mock mode."""
-    frame = np.full((height, width, 3), (34, 100, 34), dtype=np.uint8)
-    noise = np.random.randint(-10, 10, frame.shape, dtype=np.int16)
-    return np.clip(frame.astype(np.int16) + noise, 0, 255).astype(np.uint8)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

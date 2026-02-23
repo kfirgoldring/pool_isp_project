@@ -26,8 +26,9 @@ data/
 .DS_Store
 Thumbs.db
 
-# images 
+# Images and run artifacts
 table_pics/
 figures/
 captures/
+runs/
 pool_table_annotated.jpeg

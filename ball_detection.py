@@ -335,13 +335,13 @@ def _load_table_corners_from_scene_understanding(img_path: str) -> Optional[np.n
     :return:
     '''
     try:
-        import Scene_Understanding as su
+        import scene_understanding as su
         corners = su.get_table_corners(img_path)
         corners = np.asarray(corners, dtype=np.float32)
         if corners.shape == (4, 2):
             return corners
     except Exception as e:
-        raise RuntimeError("Failed to load table corners from Scene_Understanding.")
+        raise RuntimeError("Failed to load table corners from scene_understanding.")
     return None
 
 def detect_balls(
@@ -370,7 +370,7 @@ def detect_balls(
     elif table_corners is None:
         corners_arr = _load_table_corners_from_scene_understanding(ref_path)
         if corners_arr is None:
-            raise ValueError("table_corners not provided and Scene_Understanding failed to detect corners.")
+            raise ValueError("table_corners not provided and scene_understanding failed to detect corners.")
     else:
         corners_arr = np.array(list(table_corners), dtype=np.float32)
     if corners_arr.shape[0] != 4:
@@ -530,7 +530,7 @@ if __name__ == "__main__":
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     corners = _load_table_corners_from_scene_understanding(ref_path)
     if corners is None:
-        raise SystemExit("Failed to load corners from Scene_Understanding")
+        raise SystemExit("Failed to load corners from scene_understanding")
     table_area_px = float(abs(cv2.contourArea(corners)))
     dets = detect_balls(img, table_corners=corners, ref_path=ref_path, config=cfg)
     colored = detect_balls_with_color(img, table_corners=corners, ref_path=ref_path, config=cfg)

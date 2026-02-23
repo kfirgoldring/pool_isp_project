@@ -9,7 +9,7 @@ Pick a table photo, click the 4 corners manually, and get:
              Exactly what the ball-detection step receives as input.
 
   Output 2 — Corner coordinates  (4×2 float32 numpy array, [TL,TR,BR,BL])
-             Same format as get_table_corners() in Scene_Understanding.py.
+             Same format as get_table_corners() in scene_understanding.py.
              Shown as a semi-transparent polygon overlay on the original image.
 
 Controls (corner-selection window)
@@ -182,7 +182,7 @@ class _CornerPicker:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Homography & warp  (mirrors Scene_Understanding + gui/app.py pipeline)
+# Homography & warp  (mirrors scene_understanding + gui/app.py pipeline)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _compute_warp(orig_img: np.ndarray, corners: np.ndarray):
@@ -225,7 +225,7 @@ def _build_mask_preview(orig_img: np.ndarray,
     """
     Return the original image (display-sized) with a semi-transparent
     green polygon marking the table corners — same region as the mask
-    produced by get_table_corners() in Scene_Understanding.py.
+    produced by get_table_corners() in scene_understanding.py.
     """
     dh = int(orig_img.shape[0] * display_scale)
     dw = int(orig_img.shape[1] * display_scale)
