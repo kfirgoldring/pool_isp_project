@@ -2278,7 +2278,7 @@ class BilliardsApp(QMainWindow):
             self._run_dir = os.path.join(os.path.dirname(__file__), 'runs', ts)
         os.makedirs(self._run_dir, exist_ok=True)
         ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        path = os.path.join(self._run_dir, f'capture_{ts}.png')
+        path = os.path.join(self._run_dir, f'capture_{ts}.jpeg')
         cv2.imwrite(path, frame)
         self.statusBar().showMessage(f'Frame saved: {path}')
 
