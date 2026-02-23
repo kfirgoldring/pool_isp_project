@@ -47,8 +47,9 @@ class BallDetectionConfig:
         hough_param2: float = 14.0,
         min_circularity: float = 0.3,
         min_area_ratio: float = 0.002,
+        max_area_ratio: float = 0.004,
         diff_ratio: float = 0.2,
-        edge_margin: float = 0,
+        edge_margin: float = 0.04,
         hue_similarity_thresh: float = 10.0,
         # Color classification thresholds (HSV
         yellow_hue: Tuple[int, int] = (25, 30),
@@ -80,6 +81,7 @@ class BallDetectionConfig:
         # Fallback contour filtering
         self.min_circularity = min_circularity
         self.min_area_ratio = min_area_ratio
+        self.max_area_ratio=max_area_ratio
         # Non-green coverage threshold for circle filtering
         self.diff_ratio = diff_ratio
         # Edge filter margin in normalized table coordinates
@@ -225,33 +227,6 @@ def _mean_sv_in_circle(
     s_ch = hsv[:, :, 1].astype(np.float32)
     v_ch = hsv[:, :, 2].astype(np.float32)
     return float(np.mean(s_ch[mask])), float(np.mean(v_ch[mask]))
-
-def _dark_ratio_in_circle(
-    hsv: np.ndarray,
-    center: Tuple[float, float],
-    radius: float,
-    val_max: int,
-    sat_max: int = 255,
-    inner_scale: float = 1.0,
-) -> Optional[float]:
-    h_img, w_img = hsv.shape[:2]
-    if radius <= 0:
-        return None
-    mask = _circle_mask((h_img, w_img), center, radius, inner_scale=0.0)
-    if not np.any(mask):
-        return None
-    if inner_scale < 1.0:
-        inner = _circle_mask((h_img, w_img), center, radius, inner_scale=inner_scale)
-        mask = mask & inner
-    v = hsv[:, :, 2]
-    s = hsv[:, :, 1]
-    valid = mask & (s <= sat_max)
-    total = int(np.count_nonzero(valid))
-    if total == 0:
-        return None
-    dark = int(np.count_nonzero(valid & (v <= val_max)))
-    return float(dark / float(total))
-
 def _classify_color(
     hsv: np.ndarray,
     center: Tuple[float, float],
@@ -415,8 +390,11 @@ def detect_balls(
         max_r = 40
         min_dist = 20
     min_area_px = cfg.min_area_ratio * table_area_px
+    max_area_px=cfg.max_area_ratio*table_area_px
     contours, _ = cv2.findContours(diff_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     detections: List[BallDetection] = []
+    print (min_area_px)
+    print(max_area_px)
     for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < min_area_px:
@@ -426,6 +404,35 @@ def detect_balls(
             continue
         circularity = 4.0 * np.pi * area / (perimeter * perimeter)
         if circularity < cfg.min_circularity:
+            continue
+        if area > max_area_px:
+            x, y, w, h = cv2.boundingRect(cnt)
+            comp_mask = np.zeros_like(diff_mask)
+            cv2.drawContours(comp_mask, [cnt], -1, 255, -1)
+            mask_roi = comp_mask[y : y + h, x : x + w]
+            gray_roi = gray[y : y + h, x : x + w]
+            gray_roi = cv2.bitwise_and(gray_roi, gray_roi, mask=mask_roi)
+            hough = cv2.HoughCircles(
+                gray_roi,
+                cv2.HOUGH_GRADIENT,
+                dp=cfg.hough_dp,
+                minDist=min_dist if expected_radius is None else int(round(0.9 * expected_radius)),
+                param1=cfg.hough_param1,
+                param2=cfg.hough_param2,
+                minRadius=min_r,
+                maxRadius=max_r,
+            )
+            if hough is not None:
+                for c in hough[0]:
+                    cx, cy, rr = float(c[0] + x), float(c[1] + y), float(c[2])
+                    if expected_radius is not None:
+                        if rr < 0.6 * expected_radius or rr > 1.5 * expected_radius:
+                            continue
+                    x0 = int(round(cx - rr))
+                    y0 = int(round(cy - rr))
+                    detections.append(
+                        BallDetection(center=(cx, cy), radius_px=rr, bbox=(x0, y0, int(round(2 * rr)), int(round(2 * rr))))
+                    )
             continue
         (x, y), r = cv2.minEnclosingCircle(cnt)
         if expected_radius is not None:
@@ -520,12 +527,14 @@ def draw_detections(
 
 
 if __name__ == "__main__":
-    ref_path="runs/2026-02-23_11-40-10/ref.jpeg"
-    img_path="runs/2026-02-23_12-07-24/capture_20260223_121004.jpeg"
+    ref_path="runs/2026-02-23_13-53-51/ref.jpeg"
+    img_path="runs/2026-02-23_13-53-51/capture_20260223_135558.jpeg"
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
     cfg = BallDetectionConfig()
+    ball_diameter_cm = 3.0
+    table_size_cm = [120,60]
     print("min_area_ratio", cfg.min_area_ratio)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     corners = _load_table_corners_from_scene_understanding(ref_path)
@@ -534,6 +543,11 @@ if __name__ == "__main__":
     table_area_px = float(abs(cv2.contourArea(corners)))
     dets = detect_balls(img, table_corners=corners, ref_path=ref_path, config=cfg)
     colored = detect_balls_with_color(img, table_corners=corners, ref_path=ref_path, config=cfg)
+    expected_radius = _estimate_ball_radius_px(corners, ball_diameter_cm, table_size_cm)
+    if expected_radius is None and dets:
+        radii = np.array([d.radius_px for d in dets], dtype=np.float32)
+        expected_radius = float(np.median(radii))
+    expected_area_px = None if expected_radius is None else float(np.pi * expected_radius * expected_radius)
     vis = draw_detections(img, dets)
     for (x, y) in corners:
         cv2.circle(vis, (int(x), int(y)), 8, (255, 0, 255), -1)
@@ -565,6 +579,8 @@ if __name__ == "__main__":
             d.radius_px,
             "px_area",
             px_area,
+            "expected_area",
+            None if expected_area_px is None else round(expected_area_px, 2),
             "ratio",
             ratio,
             "median_hue",
