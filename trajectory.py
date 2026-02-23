@@ -35,7 +35,7 @@ def compute_pocket_positions(table_width_cm: float, table_height_cm: float, offs
 
 # Adjust offset as needed
 POCKET_POSITIONS_CM: List[Tuple[float, float]] = compute_pocket_positions(
-    TABLE_WIDTH_CM, TABLE_HEIGHT_CM, offset_cm=2.0 )
+    TABLE_WIDTH_CM, TABLE_HEIGHT_CM, offset_cm=5.0 )
 
 '''POCKET_POSITIONS_CM: List[Tuple[float, float]] = [
     (k * TABLE_WIDTH_CM / 2, j * TABLE_HEIGHT_CM)
@@ -48,7 +48,6 @@ POCKET_POSITIONS_CM: List[Tuple[float, float]] = compute_pocket_positions(
 _EXCLUDE_DIST_SQ: float = (BALL_RADIUS_CM * 0.5) ** 2
 
 
-# â"€â"€â"€ Public API â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€â"€
 def calculate_path(
     cue_cm:    Tuple[float, float],
     target_cm: Tuple[float, float],
