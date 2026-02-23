@@ -51,9 +51,9 @@ class BallDetectionConfig:
         edge_margin: float = 0,
         hue_similarity_thresh: float = 10.0,
         # Color classification thresholds (HSV
-        yellow_hue: Tuple[int, int] = (20, 40),
-        blue_hue: Tuple[int, int] = (95, 115),
-        purple_hue: Tuple[int, int] = (65, 90),
+        yellow_hue: Tuple[int, int] = (25, 30),
+        blue_hue: Tuple[int, int] = (100, 110),
+        purple_hue: Tuple[int, int] = (75, 80),
         red1_hue: Tuple[int, int] = (0, 10),
         red2_hue: Tuple[int, int] = (170, 179),
         black_val_max: int = 75,
@@ -521,7 +521,7 @@ def draw_detections(
 
 if __name__ == "__main__":
     ref_path="runs/2026-02-23_11-40-10/ref.jpeg"
-    img_path="runs/2026-02-23_11-40-10/capture_20260223_114128.jpeg"
+    img_path="runs/2026-02-23_12-07-24/capture_20260223_121004.jpeg"
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
