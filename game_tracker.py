@@ -72,6 +72,18 @@ REACQUISITION_TICKS: int = 5
 # Stroke penalty applied when the cue ball is pocketed.
 CUE_BALL_PENALTY: int = 3
 
+# Consecutive STABLE-TRACKING frames white must be absent before declaring a
+# real pocket.  Does NOT count during the reacquisition window so that motion
+# blur (track loss during a fast shot) cannot trigger a false penalty.
+# (~333 ms at 30 fps)
+CUE_POCKET_CONFIRM_FRAMES: int = 10
+
+# Consecutive STABLE-TRACKING frames a colored ball must be absent before
+# registering it as pocketed.  Guards against touching-ball detection failure
+# where two adjacent balls merge into one blob for a few frames.
+# (~167 ms at 30 fps)
+BALL_POCKET_CONFIRM_FRAMES: int = 5
+
 
 class GameTracker:
     """Unified game-state + ball-tracking controller.
@@ -132,6 +144,17 @@ class GameTracker:
 
         # Tick counter for detection throttling
         self._tick_count: int = 0
+        self._cue_ref_pos: Optional[Tuple[float, float]] = None
+        self._last_known_cue_pos: Optional[Tuple[float, float]] = None
+
+        # How many consecutive STABLE-TRACKING ticks white has been absent.
+        # Paused during the reacquisition window (_reacq_remaining > 0) so that
+        # motion blur (track loss on a fast shot) cannot trigger a false penalty.
+        self._cue_hidden_frames: int = 0
+
+        # Per-color consecutive-absence counters for colored balls.
+        # Guards against touching-ball merges causing a false pocket.
+        self._ball_hidden_frames: Dict[str, int] = {}
 
     # ── Public properties ────────────────────────────────────────────────────
 
@@ -162,6 +185,7 @@ class GameTracker:
         self,
         colored_ball_colors: List[str],
         initial_balls: List[Dict],
+        cue_ref_pos: Optional[Tuple[float, float]] = None,
     ) -> None:
         """Transition WAITING_FOR_BALLS -> TRACKING.
 
@@ -182,6 +206,10 @@ class GameTracker:
         self._calm_count = 0
         self._reacq_remaining = 0
         self._tick_count = 0
+        self._cue_ref_pos = cue_ref_pos
+        self._last_known_cue_pos = None
+        self._cue_hidden_frames = 0
+        self._ball_hidden_frames = {}
 
     def reset(self) -> None:
         """Return to WAITING_FOR_BALLS and clear all game state."""
@@ -199,6 +227,10 @@ class GameTracker:
         self._calm_count = 0
         self._reacq_remaining = 0
         self._tick_count = 0
+        self._cue_ref_pos = None
+        self._last_known_cue_pos = None
+        self._cue_hidden_frames = 0
+        self._ball_hidden_frames = {}
 
     # ── Target / ball lookup helpers ─────────────────────────────────────────
 
@@ -278,21 +310,51 @@ class GameTracker:
             self._pre_disturb_pos = dict(self._confirmed_pos)
             self.state = ST_DISTURBED
             self._calm_count = 0
+            self._cue_hidden_frames = 0   # reset occlusion counter on new disturbance
             return list(self._confirmed_balls)
 
         # 2. Feed detections into EMA tracker
         if raw_balls:
             self._do_tracking(raw_balls, create_new=True)
 
-        # 3. During re-acquisition (just returned from DISTURBED), build
+        # 3a. Track white ball occlusion — FIX #5 (motion blur).
+        #     Only count while the tracker is stable (not during reacquisition).
+        #     During reacq, the EMA is still warming up so white being absent
+        #     is expected and must NOT be counted toward the pocket threshold.
+        current_snapshot = self._emit_confirmed()
+        white_now_visible = any(b.get('color') == 'white' for b in current_snapshot)
+        if not self.cue_ball_pocketed:
+            if not white_now_visible and self._reacq_remaining == 0:
+                self._cue_hidden_frames += 1
+                # Threshold crossed: declare pocket immediately.
+                if self._cue_hidden_frames == CUE_POCKET_CONFIRM_FRAMES:
+                    self.cue_ball_pocketed = True
+                    self.stroke_count += CUE_BALL_PENALTY
+                    self._last_known_cue_pos = self._confirmed_pos.get('white')
+            elif white_now_visible:
+                self._cue_hidden_frames = 0
+
+        # 3b. Track per-color absence — FIX #6 (touching balls).
+        #     Only count while stable (not during reacq) for the same reason.
+        if self._reacq_remaining == 0:
+            for color in list(self._confirmed_pos.keys()):
+                if color == 'white':
+                    continue
+                color_visible = any(b.get('color') == color for b in current_snapshot)
+                if not color_visible:
+                    self._ball_hidden_frames[color] = \
+                        self._ball_hidden_frames.get(color, 0) + 1
+                else:
+                    self._ball_hidden_frames[color] = 0
+
+        # 4. During re-acquisition (just returned from DISTURBED), build
         #    tracks without checking for strokes yet.
         if self._reacq_remaining > 0:
             self._reacq_remaining -= 1
             if self._reacq_remaining == 0:
-                current_snapshot = self._emit_confirmed()
                 self._check_for_stroke(current_snapshot, self._pre_disturb_pos)
 
-        self._confirmed_balls = self._emit_confirmed()
+        self._confirmed_balls = current_snapshot
         return list(self._confirmed_balls)
 
     def _tick_disturbed(self, frame: np.ndarray, raw_balls: List[Dict]) -> List[Dict]:
@@ -344,24 +406,39 @@ class GameTracker:
         new_snapshot: List[Dict],
         new_pos: Dict[str, Tuple[float, float]],
     ) -> None:
-        """Record a stroke: increment count, detect pocketed balls (including cue
-        ball penalty), update confirmed positions, and check for game-over."""
+        """Record a stroke: increment count, update confirmed positions,
+        pocket any colored balls that disappeared, check for game-over.
+
+        Cue-ball pocket detection is handled entirely in _tick_tracking via
+        the _cue_hidden_frames threshold.  _register_stroke only clears the
+        flag (on scratch-return) or leaves it as-is for colored balls.
+        """
         self.stroke_count += 1
-        self.cue_ball_pocketed = False  # clear previous flag
+        self._cue_hidden_frames = 0
+        # Capture before resetting so the touching-ball guard below can read
+        # the pre-stroke absence counts (same pattern as cue_hidden_frames).
+        ball_hidden_snapshot = self._ball_hidden_frames
+        self._ball_hidden_frames = {}  # reset for the next stroke
 
-        # Detect cue ball pocket: white was tracked before, gone now → +3 penalty
-        if 'white' in self._confirmed_pos and 'white' not in new_pos:
-            self.cue_ball_pocketed = True
-            self.stroke_count += CUE_BALL_PENALTY
+        # Scratch-return confirmation: cue came back -> clear the pocketed flag.
+        # The penalty was already applied when cue_ball_pocketed was first set.
+        if self.cue_ball_pocketed and 'white' in new_pos:
+            self.cue_ball_pocketed = False
 
+        # FIX #6 (touching balls): only pocket a colored ball if it has been
+        # absent for BALL_POCKET_CONFIRM_FRAMES consecutive stable-tracking ticks.
+        # This prevents a single-frame detection failure (e.g. two balls touching
+        # and merging into one blob) from registering a false pocket.
         for color in list(self._confirmed_pos.keys()):
             if color == 'white':
                 continue
             if color in self.remaining_balls and color not in new_pos:
-                self.pocketed_balls.append(color)
-                self.remaining_balls.remove(color)
-                if self.selected_target_color == color:
-                    self.selected_target_color = None
+                hidden = ball_hidden_snapshot.get(color, 0)
+                if hidden >= BALL_POCKET_CONFIRM_FRAMES:
+                    self.pocketed_balls.append(color)
+                    self.remaining_balls.remove(color)
+                    if self.selected_target_color == color:
+                        self.selected_target_color = None
 
         self._confirmed_balls = list(new_snapshot)
         self._confirmed_pos = dict(new_pos)
@@ -436,16 +513,47 @@ class GameTracker:
                 trk['stale']  = 0
 
         if create_new:
+            # FIX #7 (foreign objects): build the set of colors we actually
+            # expect to see on the table right now.  In WAITING_FOR_BALLS all
+            # standard colors are valid; during play only remaining + white.
+            if self.state == ST_WAITING_FOR_BALLS:
+                allowed_colors = {'white', 'red', 'blue', 'green', 'yellow'}
+            else:
+                allowed_colors = set(self.remaining_balls) | {'white'}
+
             for di, det in enumerate(raw_balls):
                 if di in matched_dets:
                     continue
                 det_cm = det.get('center_cm')
                 if det_cm is None:
                     continue
+                det_color = det.get('color', '')
+
+                # Reject detections whose color is not expected (chalk, cloth, etc.)
+                if det_color not in allowed_colors:
+                    continue
+
+                # One-track-per-color cap: there is exactly one physical ball
+                # per color; a second detection of the same color is a false positive.
+                if any(t['color'] == det_color for t in self._tracks):
+                    continue
+
+                # De-duplication guard: skip if spatially too close to an existing
+                # track of any color (avoids ghost doubles at same position).
+                too_close = False
+                for trk in self._tracks:
+                    dx = det_cm[0] - trk['smooth_cm'][0]
+                    dy = det_cm[1] - trk['smooth_cm'][1]
+                    if (dx * dx + dy * dy) ** 0.5 < self._match_radius:
+                        too_close = True
+                        break
+                if too_close:
+                    continue
+
                 self._tracks.append({
                     'smooth_cm': det_cm,
                     'center':    det['center'],
-                    'color':     det['color'],
+                    'color':     det_color,
                     'is_cue':    det.get('is_cue', False),
                     'radius':    det.get('radius', 18),
                     'age':       1,
