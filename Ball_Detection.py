@@ -266,17 +266,25 @@ def _classify_color(
     median_hue = _median_hue_in_circle(hsv, center, radius, cfg.green_min_sat, cfg.green_min_val)
     if median_hue is None:
         return "unknown"
+
     h = float(median_hue)
-    if cfg.yellow_hue[0] <= h <= cfg.yellow_hue[1]:
-        return "yellow"
-    if cfg.blue_hue[0] <= h <= cfg.blue_hue[1]:
-        return "blue"
-    if cfg.purple_hue[0] <= h <= cfg.purple_hue[1]:
-        return "purple"
-    if (cfg.red1_hue[0] <= h <= cfg.red1_hue[1]) or (cfg.red2_hue[0] <= h <= cfg.red2_hue[1]):
-        return "bordeaux"
-    else:
-        return "unknown"
+    centers = [
+        ("yellow", 0.5 * (cfg.yellow_hue[0] + cfg.yellow_hue[1])),
+        ("blue", 0.5 * (cfg.blue_hue[0] + cfg.blue_hue[1])),
+        ("purple", 0.5 * (cfg.purple_hue[0] + cfg.purple_hue[1])),
+        ("bordeaux", 0.5 * (cfg.red1_hue[0] + cfg.red1_hue[1])),
+        ("bordeaux", 0.5 * (cfg.red2_hue[0] + cfg.red2_hue[1])),
+    ]
+
+    best_color = "yellow"
+    best_dist = 1e9
+    for name, center_h in centers:
+        d = abs(h - center_h)
+        circ_d = min(d, 180.0 - d)
+        if circ_d < best_dist:
+            best_dist = circ_d
+            best_color = name
+    return best_color
 
 def _estimate_ball_radius_px(
     corners: np.ndarray,
@@ -512,8 +520,8 @@ def draw_detections(
 
 
 if __name__ == "__main__":
-    ref_path="/Users/inega/Python/AcademicCourses/digital-image-processing/pool_isp_project/runs/2026-02-23_11-01-49/ref.jpeg"
-    img_path="/Users/inega/Python/AcademicCourses/digital-image-processing/pool_isp_project/runs/2026-02-23_11-01-49/capture_20260223_110902.png"
+    ref_path="runs/2026-02-23_11-40-10/ref.jpeg"
+    img_path="runs/2026-02-23_11-40-10/capture_20260223_114128.jpeg"
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
