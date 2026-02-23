@@ -25,6 +25,7 @@ Coordinate system rule:
 import sys
 import os
 import pathlib
+import datetime
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -1284,6 +1285,9 @@ class BilliardsApp(QMainWindow):
         # ── Reference image path (auto-captured from calibration frame) ───────
         self.ref_path: Optional[str] = None
 
+        # ── Run directory (created at calibration, used for all captures) ─────
+        self._run_dir: Optional[str] = None
+
         # ── Pending user clicks (table cm coordinates, drained by main.py) ───
         self._pending_clicks: List[Tuple[float, float]] = []
 
@@ -1812,9 +1816,16 @@ class BilliardsApp(QMainWindow):
             _CACHE_DIR.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(_REF_CACHE), ref_frame)
             self.ref_path = str(_REF_CACHE)
-            print('[GUI] Reference image auto-captured from calibration frame.')
+
+            ts = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            self._run_dir = os.path.join(os.path.dirname(__file__), 'runs', ts)
+            os.makedirs(self._run_dir, exist_ok=True)
+            ref_run_path = os.path.join(self._run_dir, 'ref.jpeg')
+            cv2.imwrite(ref_run_path, ref_frame)
+            print(f'[GUI] Reference image saved to run: {ref_run_path}')
         else:
             self.ref_path = None
+            self._run_dir = None
             print('[GUI] No reference frame available — ball detection may be degraded.')
 
         # Always route to PlayerRegistrationPage after calibration
@@ -2257,16 +2268,17 @@ class BilliardsApp(QMainWindow):
         self._update_status_panel()
 
     def _on_capture(self):
-        """Save the current raw camera frame to the captures/ directory."""
+        """Save the current raw camera frame to the current run directory."""
         frame = self.current_frame
         if frame is None:
             self.statusBar().showMessage('No frame available to save.')
             return
-        import datetime
-        captures_dir = os.path.join(os.path.dirname(__file__), 'captures')
-        os.makedirs(captures_dir, exist_ok=True)
+        if self._run_dir is None:
+            ts = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+            self._run_dir = os.path.join(os.path.dirname(__file__), 'runs', ts)
+        os.makedirs(self._run_dir, exist_ok=True)
         ts = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        path = os.path.join(captures_dir, f'capture_{ts}.png')
+        path = os.path.join(self._run_dir, f'capture_{ts}.png')
         cv2.imwrite(path, frame)
         self.statusBar().showMessage(f'Frame saved: {path}')
 

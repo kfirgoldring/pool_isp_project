@@ -260,8 +260,8 @@ def _classify_color(
 ) -> str:
     sv = _mean_sv_in_circle(hsv, center, radius)
     if sv is not None:
-        median_s, median_v = sv
-        if median_v - median_s >= cfg.white_sat_diff_thresh:
+        mean_s, mean_v = sv
+        if mean_v - mean_s >= cfg.white_sat_diff_thresh:
             return "white"
     median_hue = _median_hue_in_circle(hsv, center, radius, cfg.green_min_sat, cfg.green_min_val)
     if median_hue is None:
@@ -512,8 +512,8 @@ def draw_detections(
 
 
 if __name__ == "__main__":
-    ref_path="WhatsApp Image 2026-02-22 at 15.25.12 (1).jpeg"
-    img_path="WhatsApp Image 2026-02-22 at 15.25.11.jpeg"
+    ref_path="/Users/inega/Python/AcademicCourses/digital-image-processing/pool_isp_project/runs/2026-02-23_11-01-49/ref.jpeg"
+    img_path="/Users/inega/Python/AcademicCourses/digital-image-processing/pool_isp_project/runs/2026-02-23_11-01-49/capture_20260223_110902.png"
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
