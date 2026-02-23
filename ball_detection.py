@@ -45,15 +45,10 @@ class BallDetectionConfig:
         hough_dp: float = 1.2,
         hough_param1: float = 120.0,
         hough_param2: float = 14.0,
-        split_area_ratio: float = 1.6,
-        split_min_peak_dist_ratio: float = 0.8,
-        split_min_peak_radius_ratio: float = 0.4,
-        split_use_watershed: bool = True,
-        split_use_hough: bool = True,
         min_circularity: float = 0.3,
         min_area_ratio: float = 0.002,
         diff_ratio: float = 0.2,
-        edge_margin: float = 0.05,
+        edge_margin: float = 0,
         hue_similarity_thresh: float = 10.0,
         # Color classification thresholds (HSV
         yellow_hue: Tuple[int, int] = (25, 30),
@@ -82,12 +77,6 @@ class BallDetectionConfig:
         self.hough_dp = hough_dp
         self.hough_param1 = hough_param1
         self.hough_param2 = hough_param2
-        # Split touching balls
-        self.split_area_ratio = split_area_ratio
-        self.split_min_peak_dist_ratio = split_min_peak_dist_ratio
-        self.split_min_peak_radius_ratio = split_min_peak_radius_ratio
-        self.split_use_watershed = split_use_watershed
-        self.split_use_hough = split_use_hough
         # Fallback contour filtering
         self.min_circularity = min_circularity
         self.min_area_ratio = min_area_ratio
@@ -359,11 +348,10 @@ def detect_balls(
     frame_bgr: np.ndarray,
     table_corners: Optional[Iterable[Point]] = None,
     ref_path: str = "ref.jpeg",
-    ball_diameter_cm: Optional[float] = 3,
-    table_size_cm: Optional[Tuple[float, float]] = [120,60],
+    ball_diameter_cm: Optional[float] = None,
+    table_size_cm: Optional[Tuple[float, float]] = None,
     config: Optional[BallDetectionConfig] = None,
     manual_corners: bool = False,
-    debug_out: Optional[Dict[str, np.ndarray]] = None,
 ) -> List[BallDetection]:
     """
     Detect pool balls in a single frame
@@ -417,16 +405,6 @@ def detect_balls(
     _, diff_mask = cv2.threshold(gray, 25, 255, cv2.THRESH_BINARY)
     diff_mask = cv2.morphologyEx(diff_mask, cv2.MORPH_OPEN, kernel)
     diff_mask = cv2.morphologyEx(diff_mask, cv2.MORPH_CLOSE, kernel)
-    green_mask = _green_mask(hsv, table_mask, cfg)
-    non_green = cv2.bitwise_and(table_mask, cv2.bitwise_not(green_mask))
-    ball_mask = cv2.bitwise_and(diff_mask, non_green)
-    debug_vis = None
-    if debug_out is not None:
-        debug_out["diff_mask"] = diff_mask.copy()
-        debug_out["green_mask"] = green_mask.copy()
-        debug_out["non_green"] = non_green.copy()
-        debug_out["ball_mask"] = ball_mask.copy()
-        debug_vis = frame_bgr.copy()
     expected_radius = _estimate_ball_radius_px(corners_arr, ball_diameter_cm, table_size_cm)
     if expected_radius is not None:
         min_r = max(6, int(round(0.75 * expected_radius)))
@@ -437,26 +415,22 @@ def detect_balls(
         max_r = 40
         min_dist = 20
     min_area_px = cfg.min_area_ratio * table_area_px
-    contours, _ = cv2.findContours(ball_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours, _ = cv2.findContours(diff_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     detections: List[BallDetection] = []
-    expected_area = None
-    if expected_radius is not None and expected_radius > 0:
-        expected_area = float(np.pi * expected_radius * expected_radius)
-
-    def _append_circle_from_contour(cnt: np.ndarray) -> None:
+    for cnt in contours:
         area = cv2.contourArea(cnt)
         if area < min_area_px:
-            return
+            continue
         perimeter = cv2.arcLength(cnt, True)
         if perimeter <= 1e-3:
-            return
+            continue
         circularity = 4.0 * np.pi * area / (perimeter * perimeter)
         if circularity < cfg.min_circularity:
-            return
+            continue
         (x, y), r = cv2.minEnclosingCircle(cnt)
         if expected_radius is not None:
             if r < 0.6 * expected_radius or r > 1.5 * expected_radius:
-                return
+                continue
         x0 = int(round(x - r))
         y0 = int(round(y - r))
         w = int(round(2 * r))
@@ -464,114 +438,6 @@ def detect_balls(
         detections.append(
                 BallDetection(center=(float(x), float(y)), radius_px=float(r), bbox=(x0, y0, w, h))
             )
-        if debug_vis is not None:
-            cv2.circle(debug_vis, (int(round(x)), int(round(y))), int(round(r)), (0, 200, 0), 2)
-            cv2.circle(debug_vis, (int(round(x)), int(round(y))), 3, (0, 200, 0), -1)
-
-    def _nms_peaks(peaks: List[Tuple[int, int, float]], min_dist_px: float) -> List[Tuple[int, int, float]]:
-        kept: List[Tuple[int, int, float]] = []
-        for y, x, val in peaks:
-            keep = True
-            for ky, kx, _ in kept:
-                if (kx - x) * (kx - x) + (ky - y) * (ky - y) < min_dist_px * min_dist_px:
-                    keep = False
-                    break
-            if keep:
-                kept.append((y, x, val))
-        return kept
-
-    for cnt in contours:
-        if expected_area is None:
-            _append_circle_from_contour(cnt)
-            continue
-
-        area = cv2.contourArea(cnt)
-        if area < min_area_px:
-            continue
-        if area <= cfg.split_area_ratio * expected_area:
-            _append_circle_from_contour(cnt)
-            continue
-
-        x, y, w, h = cv2.boundingRect(cnt)
-        comp_mask = np.zeros_like(ball_mask)
-        cv2.drawContours(comp_mask, [cnt], -1, 255, -1)
-
-        circles_added = 0
-        if cfg.split_use_hough:
-            gray_roi = gray[y : y + h, x : x + w]
-            mask_roi = comp_mask[y : y + h, x : x + w]
-            gray_roi = cv2.bitwise_and(gray_roi, gray_roi, mask=mask_roi)
-            hough = cv2.HoughCircles(
-                gray_roi,
-                cv2.HOUGH_GRADIENT,
-                dp=cfg.hough_dp,
-                minDist=max(1, int(round(cfg.split_min_peak_dist_ratio * expected_radius))),
-                param1=cfg.hough_param1,
-                param2=cfg.hough_param2,
-                minRadius=min_r,
-                maxRadius=max_r,
-            )
-            if hough is not None:
-                for c in hough[0]:
-                    cx, cy, rr = float(c[0] + x), float(c[1] + y), float(c[2])
-                    if rr < 0.6 * expected_radius or rr > 1.5 * expected_radius:
-                        continue
-                    x0 = int(round(cx - rr))
-                    y0 = int(round(cy - rr))
-                    detections.append(
-                        BallDetection(center=(cx, cy), radius_px=rr, bbox=(x0, y0, int(round(2 * rr)), int(round(2 * rr))))
-                    )
-                    circles_added += 1
-                    if debug_vis is not None:
-                        cv2.circle(debug_vis, (int(round(cx)), int(round(cy))), int(round(rr)), (0, 255, 255), 2)
-                        cv2.circle(debug_vis, (int(round(cx)), int(round(cy))), 3, (0, 255, 255), -1)
-            if circles_added >= 2:
-                continue
-
-        if not cfg.split_use_watershed:
-            _append_circle_from_contour(cnt)
-            continue
-
-        dist = cv2.distanceTransform(comp_mask, cv2.DIST_L2, 5)
-        if dist.max() <= 0:
-            _append_circle_from_contour(cnt)
-            continue
-        peak_min_val = float(cfg.split_min_peak_radius_ratio * expected_radius)
-        dil = cv2.dilate(dist, np.ones((3, 3), np.uint8))
-        peak_mask = (dist >= peak_min_val) & (dist == dil)
-        ys, xs = np.where(peak_mask)
-        peaks = [(int(yy), int(xx), float(dist[yy, xx])) for yy, xx in zip(ys, xs)]
-        peaks.sort(key=lambda p: p[2], reverse=True)
-        peaks = _nms_peaks(peaks, cfg.split_min_peak_dist_ratio * expected_radius)
-        if len(peaks) < 2:
-            _append_circle_from_contour(cnt)
-            continue
-        if debug_vis is not None:
-            for yy, xx, _ in peaks:
-                cv2.circle(debug_vis, (int(xx), int(yy)), 4, (255, 255, 0), -1)
-
-        markers = np.zeros_like(comp_mask, dtype=np.int32)
-        markers[comp_mask == 0] = 1
-        for i, (yy, xx, _) in enumerate(peaks, start=2):
-            markers[yy, xx] = i
-        ws = cv2.watershed(frame_bgr, markers)
-        if debug_vis is not None:
-            boundary = ws == -1
-            debug_vis[boundary] = (255, 0, 255)
-        labels = [lab for lab in np.unique(ws) if lab > 1]
-        if len(labels) < 2:
-            _append_circle_from_contour(cnt)
-            continue
-        for lab in labels:
-            seg_mask = (ws == lab).astype(np.uint8) * 255
-            seg_cnts, _ = cv2.findContours(seg_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if not seg_cnts:
-                continue
-            seg = max(seg_cnts, key=cv2.contourArea)
-            _append_circle_from_contour(seg)
-
-    if debug_out is not None and debug_vis is not None:
-        debug_out["debug_vis"] = debug_vis
 
     # Filter detections near the table edges using normalized table coordinates
     dst = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], dtype=np.float32)
@@ -654,8 +520,8 @@ def draw_detections(
 
 
 if __name__ == "__main__":
-    ref_path="runs/2026-02-23_13-53-51/ref.jpeg"
-    img_path="runs/2026-02-23_13-53-51/capture_20260223_135452.jpeg"
+    ref_path="runs/2026-02-23_11-40-10/ref.jpeg"
+    img_path="runs/2026-02-23_12-07-24/capture_20260223_121004.jpeg"
     img = cv2.imread(img_path)
     if img is None:
         raise SystemExit("Failed to read pool_table.jpeg")
@@ -666,10 +532,9 @@ if __name__ == "__main__":
     if corners is None:
         raise SystemExit("Failed to load corners from scene_understanding")
     table_area_px = float(abs(cv2.contourArea(corners)))
-    debug = {}
-    dets = detect_balls(img, table_corners=corners, ref_path=ref_path, config=cfg, debug_out=debug)
+    dets = detect_balls(img, table_corners=corners, ref_path=ref_path, config=cfg)
     colored = detect_balls_with_color(img, table_corners=corners, ref_path=ref_path, config=cfg)
-    vis = debug.get("debug_vis", draw_detections(img, dets))
+    vis = draw_detections(img, dets)
     for (x, y) in corners:
         cv2.circle(vis, (int(x), int(y)), 8, (255, 0, 255), -1)
     for i, d in enumerate(dets):
