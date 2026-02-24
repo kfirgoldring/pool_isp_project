@@ -493,20 +493,6 @@ def detect_balls_hough(
         color = _classify_color(hsv, d.center, d.radius_px, cfg)
         if color != "unknown":
             color_filtered.append(d)
-        else:
-            median_hue = _median_hue_in_circle(hsv, d.center, d.radius_px, cfg.green_min_sat, cfg.green_min_val)
-            print(
-                "dropped_by_color",
-                "center", (round(d.center[0], 2), round(d.center[1], 2)),
-                "radius", round(d.radius_px, 2),
-                "median_hue", None if median_hue is None else round(median_hue, 2),
-                "ranges",
-                "yellow", cfg.yellow_hue,
-                "blue", cfg.blue_hue,
-                "purple", cfg.purple_hue,
-                "red1", cfg.red1_hue,
-                "red2", cfg.red2_hue,
-            )
     return color_filtered
 
 

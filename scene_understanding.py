@@ -391,7 +391,6 @@ def detect_disturbance(ref, image):
     #cv2.imshow("mask", mask_resize)
     #diff_resize = cv2.resize(diff, (diff.shape[1] // 2, diff.shape[0] // 2))
     #cv2.imshow("Difference", diff_resize)
-    cv2.waitKey(0)
 
     # Step 6: Decide disturbance
     diff_pixel_thresh = 100

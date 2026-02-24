@@ -84,6 +84,13 @@ CUE_POCKET_CONFIRM_FRAMES: int = 10
 # (~167 ms at 30 fps)
 BALL_POCKET_CONFIRM_FRAMES: int = 5
 
+# Border disturbance detection: detects static presence (hand/cue) at the
+# table edge by comparing against a clean reference image.  Used to prevent
+# premature DISTURBED → TRACKING transition while the player is aiming.
+BORDER_ERODE_PX:      int = 30    # erosion to build the inner-edge ring mask
+BORDER_DIFF_THRESH:   int = 100   # per-pixel intensity threshold
+BORDER_PIXEL_THRESH:  int = 100   # min differing pixels to flag disturbance
+
 
 class GameTracker:
     """Unified game-state + ball-tracking controller.
@@ -131,9 +138,10 @@ class GameTracker:
         self._confirmed_balls: List[Dict]   = []
         self._confirmed_pos: Dict[str, Tuple[float, float]] = {}
 
-        # Snapshot taken right before entering DISTURBED so we can compare
+        # Snapshots taken right before entering DISTURBED so we can compare
         # after calm returns.
         self._pre_disturb_pos: Dict[str, Tuple[float, float]] = {}
+        self._pre_disturb_frame: Optional[np.ndarray] = None
 
         # Motion detection (table_corners restricts diff to the table polygon)
         self._table_corners: Optional[np.ndarray] = None
@@ -141,6 +149,10 @@ class GameTracker:
         self._table_mask_count: int = 0
         self._ref_frame: Optional[np.ndarray] = None
         self._calm_count: int = 0
+
+        # Border disturbance: detects static hand/cue at table edge
+        self._ref_image: Optional[np.ndarray] = None
+        self._border_mask: Optional[np.ndarray] = None
 
         # Re-acquisition counter (counts down after DISTURBED -> TRACKING)
         self._reacq_remaining: int = 0
@@ -172,8 +184,24 @@ class GameTracker:
             self._table_corners = None
             self._table_mask = None
             self._table_mask_count = 0
+            self._border_mask = None
             return
-        self._table_corners = np.asarray(corners, dtype=np.int32)
+        new_corners = np.asarray(corners, dtype=np.int32)
+        if self._table_corners is not None and np.array_equal(self._table_corners, new_corners):
+            return
+        self._table_corners = new_corners
+        self._table_mask = None
+        self._table_mask_count = 0
+        self._border_mask = None
+
+    def set_ref_image(self, ref_bgr: Optional[np.ndarray]) -> None:
+        """Provide the clean empty-table reference image for border disturbance."""
+        if ref_bgr is not None and self._ref_image is not None \
+                and ref_bgr.shape == self._ref_image.shape \
+                and np.array_equal(ref_bgr, self._ref_image):
+            return
+        self._ref_image = ref_bgr
+        self._border_mask = None
 
     @property
     def needs_detection(self) -> bool:
@@ -219,6 +247,7 @@ class GameTracker:
         self._confirmed_balls = list(initial_balls)
         self._confirmed_pos = _extract_positions(initial_balls)
         self._pre_disturb_pos = {}
+        self._pre_disturb_frame = None
         self._tracks = []
         self._ref_frame = None
         self._calm_count = 0
@@ -241,6 +270,7 @@ class GameTracker:
         self._confirmed_balls = []
         self._confirmed_pos = {}
         self._pre_disturb_pos = {}
+        self._pre_disturb_frame = None
         self._tracks = []
         self._ref_frame = None
         self._calm_count = 0
@@ -356,9 +386,12 @@ class GameTracker:
         # 1. Cheap motion check — may transition to DISTURBED
         if self._check_motion(frame):
             self._pre_disturb_pos = dict(self._confirmed_pos)
+            self._pre_disturb_frame = frame.copy()
             self.state = ST_DISTURBED
             self._calm_count = 0
-            self._cue_hidden_frames = 0   # reset occlusion counter on new disturbance
+            self._cue_hidden_frames = 0
+            self._ball_hidden_frames = {}
+            print(f'[tracker] TRACKING → DISTURBED  (motion detected)')
             return list(self._confirmed_balls)
 
         # 2. Feed detections into EMA tracker
@@ -379,6 +412,7 @@ class GameTracker:
                     self.cue_ball_pocketed = True
                     self.stroke_count += CUE_BALL_PENALTY
                     self._last_known_cue_pos = self._confirmed_pos.get('white')
+                    print(f'[tracker] CUE BALL POCKETED — penalty +{CUE_BALL_PENALTY}, strokes={self.stroke_count}')
             elif white_now_visible:
                 self._cue_hidden_frames = 0
 
@@ -400,6 +434,8 @@ class GameTracker:
         if self._reacq_remaining > 0:
             self._reacq_remaining -= 1
             if self._reacq_remaining == 0:
+                colors_now = sorted(c for c in _extract_positions(current_snapshot))
+                print(f'[tracker] Reacquisition done — checking stroke  balls={colors_now}')
                 self._check_for_stroke(current_snapshot, self._pre_disturb_pos)
 
         self._confirmed_balls = current_snapshot
@@ -423,10 +459,10 @@ class GameTracker:
             self._calm_count += 1
             if self._calm_count >= CALM_FRAMES_REQUIRED:
                 self.state = ST_TRACKING
-                self._tracks = []
                 self._ref_frame = None
                 self._calm_count = 0
                 self._reacq_remaining = REACQUISITION_TICKS
+                print(f'[tracker] DISTURBED → TRACKING  (calm for {CALM_FRAMES_REQUIRED} frames, reacq={REACQUISITION_TICKS})')
 
         return list(self._confirmed_balls)
 
@@ -467,6 +503,7 @@ class GameTracker:
         is_scratch_return = self.cue_ball_pocketed and 'white' in new_pos
         if not is_scratch_return:
             self.stroke_count += 1
+            print(f'[tracker] Stroke #{self.stroke_count}  balls={list(new_pos.keys())}')
         self._cue_hidden_frames = 0
         # Capture before resetting so the touching-ball guard below can read
         # the pre-stroke absence counts (same pattern as cue_hidden_frames).
@@ -478,6 +515,7 @@ class GameTracker:
         if self.cue_ball_pocketed and 'white' in new_pos:
             self.cue_ball_pocketed = False
             self._scratch_return_cooldown = 60  # ~2 s at 30 fps
+            print(f'[tracker] Cue ball returned — scratch cleared')
 
         # FIX #6 (touching balls): only pocket a colored ball if it has been
         # absent for BALL_POCKET_CONFIRM_FRAMES consecutive stable-tracking ticks,
@@ -493,6 +531,7 @@ class GameTracker:
                 if hidden >= BALL_POCKET_CONFIRM_FRAMES or was_present_before_shot:
                     self.pocketed_balls.append(color)
                     self.remaining_balls.remove(color)
+                    print(f'[tracker] POCKETED: {color}  remaining={self.remaining_balls}')
                     if self.selected_target_color == color:
                         self.selected_target_color = None
 
@@ -501,6 +540,7 @@ class GameTracker:
 
         if len(self.remaining_balls) == 0:
             self.state = ST_GAME_OVER
+            print(f'[tracker] GAME OVER — all balls pocketed in {self.stroke_count} strokes')
 
     # ── Motion detection ─────────────────────────────────────────────────────
 
@@ -540,6 +580,39 @@ class GameTracker:
         if has_motion:
             self._ref_frame = frame.copy()
         return has_motion
+
+    def _check_border_disturbance(self, frame: np.ndarray) -> bool:
+        """Detect static presence (hand / cue) at the table edge.
+
+        Compares the current frame against the *pre-disturb* frame (the last
+        calm frame before entering DISTURBED) in a thin ring along the inner
+        table border.  Using the pre-disturb frame rather than the empty-table
+        reference avoids false positives from balls that are already on the
+        table — only new objects (hand, cue) that appeared at the border
+        since the last calm state are detected.
+        """
+        if self._pre_disturb_frame is None or self._table_corners is None:
+            return False
+
+        h, w = frame.shape[:2]
+        if self._pre_disturb_frame.shape[:2] != (h, w):
+            return False
+
+        if self._border_mask is None:
+            mask_full = np.zeros((h, w), dtype=np.uint8)
+            cv2.fillConvexPoly(mask_full, self._table_corners, 255)
+            kernel = cv2.getStructuringElement(
+                cv2.MORPH_ELLIPSE,
+                (BORDER_ERODE_PX, BORDER_ERODE_PX),
+            )
+            mask_eroded = cv2.erode(mask_full, kernel, iterations=1)
+            self._border_mask = cv2.subtract(mask_full, mask_eroded)
+
+        diff = cv2.absdiff(frame, self._pre_disturb_frame)
+        diff_gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY) if diff.ndim == 3 else diff
+        diff_gray = cv2.bitwise_and(diff_gray, diff_gray, mask=self._border_mask)
+        num_diff = int(np.count_nonzero(diff_gray > BORDER_DIFF_THRESH))
+        return num_diff > BORDER_PIXEL_THRESH
 
     # ── EMA ball tracking ────────────────────────────────────────────────────
 
