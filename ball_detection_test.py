@@ -56,8 +56,8 @@ class BallDetectionConfig:
         hue_similarity_thresh: float = 10.0,
         # Color classification thresholds (HSV
         yellow_hue: Tuple[int, int] = (25, 30),
-        blue_hue: Tuple[int, int] = (100, 110),
-        purple_hue: Tuple[int, int] = (70, 125),
+        blue_hue: Tuple[int, int] = (100, 115),
+        purple_hue: Tuple[int, int] = (70, 95),
         red1_hue: Tuple[int, int] = (0, 10),
         red2_hue: Tuple[int, int] = (170, 179),
         black_val_max: int = 75,
@@ -273,8 +273,6 @@ def _classify_color(
         mean_s, mean_v = sv
         if mean_v - mean_s >= cfg.white_sat_diff_thresh:
             return "white"
-    # min_sat=80 includes moderately-saturated balls like purple (sat ~110-140)
-    # while excluding low-sat green fringe pixels that would skew the hue.
     median_hue = _median_hue_in_circle(hsv, center, radius, min_sat=80, min_val=30)
     if median_hue is None:
         median_hue = _median_hue_in_circle(hsv, center, inner_r, min_sat=80, min_val=30)
@@ -291,12 +289,23 @@ def _classify_color(
 
     if _in_range(h, cfg.yellow_hue):
         return "yellow"
+    if _in_range(h, cfg.red1_hue) or _in_range(h, cfg.red2_hue):
+        return "bordeaux"
+    # Blue and purple overlap in hue (both appear in 70-115 range depending
+    # on sampling), but are cleanly separable by saturation:
+    #   Blue:   S ~185-220 (vivid)
+    #   Purple: S ~104-142 (moderate)
+    if sv is not None:
+        mean_s, _ = sv
+        if 65 <= h <= 120:
+            if mean_s >= 160:
+                return "blue"
+            else:
+                return "purple"
     if _in_range(h, cfg.blue_hue):
         return "blue"
     if _in_range(h, cfg.purple_hue):
         return "purple"
-    if _in_range(h, cfg.red1_hue) or _in_range(h, cfg.red2_hue):
-        return "bordeaux"
     return "unknown"
 
 

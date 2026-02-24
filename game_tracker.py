@@ -84,9 +84,11 @@ CUE_POCKET_CONFIRM_FRAMES: int = 60
 # (~167 ms at 30 fps)
 BALL_POCKET_CONFIRM_FRAMES: int = 5
 
-# Border disturbance detection: detects static presence (hand/cue) at the
-# table edge by comparing against a clean reference image.  Used to prevent
-# premature DISTURBED → TRACKING transition while the player is aiming.
+# Border disturbance detection (INACTIVE — infrastructure only).
+# _check_border_disturbance() is implemented but not called from the hot
+# path because comparing against _pre_disturb_frame also picks up balls
+# that moved during the shot, causing permanent false positives.  Kept for
+# future use with a better reference strategy.
 BORDER_ERODE_PX:      int = 30    # erosion to build the inner-edge ring mask
 BORDER_DIFF_THRESH:   int = 100   # per-pixel intensity threshold
 BORDER_PIXEL_THRESH:  int = 100   # min differing pixels to flag disturbance
@@ -150,7 +152,7 @@ class GameTracker:
         self._ref_frame: Optional[np.ndarray] = None
         self._calm_count: int = 0
 
-        # Border disturbance: detects static hand/cue at table edge
+        # Border disturbance (inactive — see constants comment above)
         self._ref_image: Optional[np.ndarray] = None
         self._border_mask: Optional[np.ndarray] = None
 
@@ -211,7 +213,7 @@ class GameTracker:
         TRACKING (re-acquiring): every tick (need fresh data).
         TRACKING (normal): every Nth tick (drift correction only).
         DISTURBED: every tick (keep tracks warm so reacquisition is instant).
-        GAME_OVER: never.
+        GAME_OVER: every Nth tick (detect returned balls).
         """
         if self.state == ST_WAITING_FOR_BALLS:
             return True
@@ -223,6 +225,8 @@ class GameTracker:
             return self._tick_count % self._tracking_interval == 0
         if self.state == ST_DISTURBED:
             return True
+        if self.state == ST_GAME_OVER:
+            return self._tick_count % self._tracking_interval == 0
         return False
 
     # ── Lifecycle methods ────────────────────────────────────────────────────
@@ -344,6 +348,18 @@ class GameTracker:
             return self._tick_waiting(raw_balls)
 
         if self.state == ST_GAME_OVER:
+            if raw_balls:
+                self._do_tracking(raw_balls, create_new=True)
+                snapshot = self._emit_confirmed()
+                for color in list(self.pocketed_balls):
+                    if any(b.get('color') == color for b in snapshot):
+                        self.pocketed_balls.remove(color)
+                        self.remaining_balls.append(color)
+                        print(f'[tracker] RETURNED: {color} back on table  remaining={self.remaining_balls}')
+                if self.remaining_balls:
+                    self.state = ST_TRACKING
+                    print(f'[tracker] GAME_OVER → TRACKING  (ball returned)')
+                self._confirmed_balls = snapshot
             return list(self._confirmed_balls)
 
         if self.state == ST_TRACKING:
@@ -437,6 +453,14 @@ class GameTracker:
                 colors_now = sorted(c for c in _extract_positions(current_snapshot))
                 print(f'[tracker] Reacquisition done — checking stroke  balls={colors_now}')
                 self._check_for_stroke(current_snapshot, self._pre_disturb_pos)
+
+        # 5. Auto-detect returned pocketed balls: if a pocketed color
+        #    reappears in the confirmed snapshot, move it back to remaining.
+        for color in list(self.pocketed_balls):
+            if any(b.get('color') == color for b in current_snapshot):
+                self.pocketed_balls.remove(color)
+                self.remaining_balls.append(color)
+                print(f'[tracker] RETURNED: {color} back on table  remaining={self.remaining_balls}')
 
         self._confirmed_balls = current_snapshot
         return list(self._confirmed_balls)
@@ -663,7 +687,7 @@ class GameTracker:
             if self.state == ST_WAITING_FOR_BALLS:
                 allowed_colors = {'white', 'bordeaux', 'blue', 'purple', 'yellow'}
             else:
-                allowed_colors = set(self.remaining_balls) | {'white'}
+                allowed_colors = set(self.remaining_balls) | set(self.pocketed_balls) | {'white'}
 
             for di, det in enumerate(raw_balls):
                 if di in matched_dets:
