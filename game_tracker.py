@@ -70,6 +70,11 @@ CALM_FRAMES_REQUIRED: int = 30
 # checking for strokes.  Keeps a single noisy frame from causing a false shot.
 REACQUISITION_TICKS: int = 5
 
+# Once re-acquired, require this many consecutive tracking ticks with stable
+# ball positions before confirming the stroke (~1 s at 30 fps).
+STROKE_SETTLE_FRAMES: int = 30
+STROKE_SETTLE_EPS_CM: float = SHOT_THRESHOLD_CM
+
 # Stroke penalty applied when the cue ball is pocketed.
 CUE_BALL_PENALTY: int = 3
 
@@ -164,6 +169,12 @@ class GameTracker:
 
         # Re-acquisition counter (counts down after DISTURBED -> TRACKING)
         self._reacq_remaining: int = 0
+
+        # Shot-confirmation state: once disturbance starts, we wait until
+        # positions settle for STROKE_SETTLE_FRAMES before checking stroke.
+        self._shot_pending: bool = False
+        self._settle_count: int = 0
+        self._settle_anchor_pos: Dict[str, Tuple[float, float]] = {}
 
         # Tick counter for detection throttling
         self._tick_count: int = 0
@@ -266,6 +277,9 @@ class GameTracker:
         self._ref_frame = None
         self._calm_count = 0
         self._reacq_remaining = 0
+        self._shot_pending = False
+        self._settle_count = 0
+        self._settle_anchor_pos = {}
         self._tick_count = 0
         self._cue_ref_pos = cue_ref_pos
         self._last_known_cue_pos = None
@@ -290,6 +304,9 @@ class GameTracker:
         self._ref_frame = None
         self._calm_count = 0
         self._reacq_remaining = 0
+        self._shot_pending = False
+        self._settle_count = 0
+        self._settle_anchor_pos = {}
         self._tick_count = 0
         self._cue_ref_pos = None
         self._last_known_cue_pos = None
@@ -312,6 +329,9 @@ class GameTracker:
                 self.remaining_balls.remove(color)
                 self.pocketed_balls.append(color)
         self.stroke_count += 1
+        self._shot_pending = False
+        self._settle_count = 0
+        self._settle_anchor_pos = {}
         self._confirmed_pos = _extract_positions(list(self._confirmed_balls))
         if not self.remaining_balls:
             self.state = ST_GAME_OVER
@@ -408,11 +428,9 @@ class GameTracker:
     def _tick_tracking(self, frame: np.ndarray, raw_balls: List[Dict]) -> List[Dict]:
         """TRACKING: detect motion, update tracks, check for strokes.
 
-        Strokes are only detected through the DISTURBED -> re-acquisition
-        path.  Balls are assumed static in TRACKING; the EMA is used purely
-        to refine accuracy, not to detect movement.  Comparing cumulative
-        EMA drift against a fixed snapshot would cause false positives from
-        detection noise.
+        A stroke is considered pending once motion is detected. After calm is
+        restored and tracks are re-acquired, we require ~1 second of stable
+        confirmed ball positions before evaluating whether a stroke occurred.
         """
 
         # 0. Post-scratch-return grace period: keep tracking but suppress
@@ -427,7 +445,11 @@ class GameTracker:
 
         # 1. Cheap motion check — may transition to DISTURBED
         if self._check_motion(frame):
-            self._pre_disturb_pos = dict(self._confirmed_pos)
+            if not self._shot_pending:
+                self._pre_disturb_pos = dict(self._confirmed_pos)
+                self._shot_pending = True
+            self._settle_count = 0
+            self._settle_anchor_pos = {}
             self._pre_disturb_frame = frame.copy()
             self.state = ST_DISTURBED
             self._calm_count = 0
@@ -492,10 +514,37 @@ class GameTracker:
         #    tracks without checking for strokes yet.
         if self._reacq_remaining > 0:
             self._reacq_remaining -= 1
-            if self._reacq_remaining == 0:
+            if self._reacq_remaining == 0 and self._shot_pending:
+                self._settle_count = 0
+                self._settle_anchor_pos = {}
                 colors_now = sorted(c for c in _extract_positions(current_snapshot))
-                print(f'[tracker] Reacquisition done — checking stroke  balls={colors_now}')
+                print(
+                    '[tracker] Reacquisition done — waiting stable positions '
+                    f'for {STROKE_SETTLE_FRAMES} frames  balls={colors_now}'
+                )
+
+        # 5. Shot confirmation: only check for stroke after positions are stable
+        #    for ~1 second in TRACKING.
+        if self._shot_pending and self._reacq_remaining == 0:
+            current_pos = _extract_positions(current_snapshot)
+            if not self._settle_anchor_pos:
+                self._settle_anchor_pos = dict(current_pos)
+                self._settle_count = 1
+            elif _positions_stable(
+                self._settle_anchor_pos, current_pos, STROKE_SETTLE_EPS_CM
+            ):
+                self._settle_count += 1
+            else:
+                self._settle_anchor_pos = dict(current_pos)
+                self._settle_count = 1
+
+            if self._settle_count >= STROKE_SETTLE_FRAMES:
+                print(f'[tracker] Positions stable — checking stroke')
                 self._check_for_stroke(current_snapshot, self._pre_disturb_pos)
+                self._shot_pending = False
+                self._settle_count = 0
+                self._settle_anchor_pos = {}
+                self._pre_disturb_pos = dict(self._confirmed_pos)
 
         self._confirmed_balls = current_snapshot
         return list(self._confirmed_balls)
@@ -560,9 +609,14 @@ class GameTracker:
         # Scratch-return: placing the cue ball back is NOT a stroke — the
         # penalty (+CUE_BALL_PENALTY) was already applied at pocket detection.
         is_scratch_return = self.cue_ball_pocketed and 'white' in new_pos
+        stroke_added = False
         if not is_scratch_return:
             self.stroke_count += 1
+            stroke_added = True
             print(f'[tracker] Stroke #{self.stroke_count}  balls={list(new_pos.keys())}')
+        self._shot_pending = False
+        self._settle_count = 0
+        self._settle_anchor_pos = {}
         self._cue_hidden_frames = 0
         # Capture before resetting so the touching-ball guard below can read
         # the pre-stroke absence counts (same pattern as cue_hidden_frames).
@@ -581,6 +635,7 @@ class GameTracker:
         # OR if it was present in the pre-shot snapshot (_pre_disturb_pos) but is
         # now gone — meaning it was definitively pocketed during this stroke cycle
         # (the ball rolls in during DISTURBED so hidden-frame counts stay at 0).
+        pocketed_this_event = False
         for color in list(self._confirmed_pos.keys()):
             if color == 'white':
                 continue
@@ -588,12 +643,19 @@ class GameTracker:
                 hidden = ball_hidden_snapshot.get(color, 0)
                 was_present_before_shot = color in self._pre_disturb_pos
                 if hidden >= BALL_POCKET_CONFIRM_FRAMES or was_present_before_shot:
+                    pocketed_this_event = True
                     self.pocketed_balls.append(color)
                     self.remaining_balls.remove(color)
                     self._return_detect_hits[color] = 0
                     print(f'[tracker] POCKETED: {color}  remaining={self.remaining_balls}')
                     if self.selected_target_color == color:
                         self.selected_target_color = None
+
+        # User rule: a confirmed pocket event must contribute one stroke.
+        # This mainly covers scratch-return calls where we normally skip +1.
+        if pocketed_this_event and not stroke_added:
+            self.stroke_count += 1
+            print(f'[tracker] Stroke #{self.stroke_count}  (pocket event)')
 
         # Check if any pocketed ball reappeared after this stroke (placed back).
         for color in list(self.pocketed_balls):
@@ -832,3 +894,18 @@ def _any_ball_disappeared(
         if color not in new_pos:
             return True
     return False
+
+
+def _positions_stable(
+    anchor_pos: Dict[str, Tuple[float, float]],
+    current_pos: Dict[str, Tuple[float, float]],
+    threshold_cm: float,
+) -> bool:
+    """True when color set and positions remain within *threshold_cm*."""
+    if set(anchor_pos.keys()) != set(current_pos.keys()):
+        return False
+    for color, (ax, ay) in anchor_pos.items():
+        cx, cy = current_pos[color]
+        if (cx - ax) ** 2 + (cy - ay) ** 2 > threshold_cm ** 2:
+            return False
+    return True
