@@ -232,6 +232,24 @@ class GameTracker:
         self._cue_hidden_frames = 0
         self._ball_hidden_frames = {}
 
+    def force_shot(self) -> None:
+        """Debug: register one stroke without physical motion.
+
+        Balls that were removed from the fake-ball list since the last call are
+        treated as pocketed.  Has no effect outside of TRACKING state.
+        """
+        if self.state != ST_TRACKING:
+            return
+        current_colors = {b['color'] for b in self._confirmed_balls}
+        for color in list(self.remaining_balls):
+            if color not in current_colors:
+                self.remaining_balls.remove(color)
+                self.pocketed_balls.append(color)
+        self.stroke_count += 1
+        self._confirmed_pos = _extract_positions(list(self._confirmed_balls))
+        if not self.remaining_balls:
+            self.state = ST_GAME_OVER
+
     # ── Target / ball lookup helpers ─────────────────────────────────────────
 
     def select_target(self, color: str) -> bool:
@@ -517,7 +535,7 @@ class GameTracker:
             # expect to see on the table right now.  In WAITING_FOR_BALLS all
             # standard colors are valid; during play only remaining + white.
             if self.state == ST_WAITING_FOR_BALLS:
-                allowed_colors = {'white', 'red', 'blue', 'green', 'yellow'}
+                allowed_colors = {'white', 'yellow', 'blue', 'bordeaux', 'purple'}
             else:
                 allowed_colors = set(self.remaining_balls) | {'white'}
 

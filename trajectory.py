@@ -47,6 +47,11 @@ POCKET_POSITIONS_CM: List[Tuple[float, float]] = compute_pocket_positions(
 # Avoids fragile exact float equality after homography conversion.
 _EXCLUDE_DIST_SQ: float = (BALL_RADIUS_CM * 0.5) ** 2
 
+# Absolute normalisation denominator: diagonal of the playing surface.
+# A distance equal to the full table diagonal normalises to 1.0.
+# ≈ 136.4 cm for a 122 × 61 table.
+_TABLE_DIAGONAL_CM: float = math.sqrt(TABLE_WIDTH_CM ** 2 + TABLE_HEIGHT_CM ** 2)
+
 
 def calculate_path(
     cue_cm:    Tuple[float, float],
@@ -104,6 +109,53 @@ def calculate_path(
     target_path = [(tx, ty), (px, py)]
     return cue_path, target_path
 
+def _pocket_normal(pocket_cm: Tuple[float, float]) -> Tuple[float, float]:
+    """
+    Return the inward-facing unit normal for a pocket.
+
+    Corner pockets get a ±45° diagonal normal pointing toward the table
+    interior.  Mid-rail (side) pockets get a normal perpendicular to the
+    long rail, also pointing inward.
+    """
+    px, py = pocket_cm
+    # A pocket near the horizontal centre of the table is a mid-rail pocket.
+    is_mid_rail = abs(px - TABLE_WIDTH_CM / 2) < TABLE_WIDTH_CM * 0.1
+    nx = 0.0 if is_mid_rail else (1.0 if px < TABLE_WIDTH_CM / 2 else -1.0)
+    ny = 1.0 if py < TABLE_HEIGHT_CM / 2 else -1.0
+    mag = math.hypot(nx, ny)
+    return (nx / mag, ny / mag)
+
+
+def _entry_angle_penalty(
+    final_start: Tuple[float, float],
+    pocket_cm:   Tuple[float, float],
+    k: float = 0.15,
+) -> float:
+    """
+    Penalise shots that hug the rail into the pocket.
+
+    φ is the angle between the final trajectory segment and the pocket's
+    inward normal.  A ball arriving straight along the normal (φ = 0) pays
+    no penalty; one arriving tangentially along the rail (φ ≈ 90°) pays k.
+
+    Penalty = k × (1 − cos φ)
+
+    Pass `target_path[-2]` as final_start so bank shots are automatically
+    evaluated on their post-cushion segment.
+    """
+    dx = pocket_cm[0] - final_start[0]
+    dy = pocket_cm[1] - final_start[1]
+    dist = math.hypot(dx, dy)
+    if dist < 1e-6:
+        return 0.0
+    tx, ty = dx / dist, dy / dist          # unit vector toward pocket
+    nx, ny = _pocket_normal(pocket_cm)
+    # For a perfect shot the ball travels in the −normal direction,
+    # so cos φ = −dot(trajectory, normal).
+    cos_phi = max(-1.0, min(1.0, -(tx * nx + ty * ny)))
+    return k * (1.0 - cos_phi)
+
+
 def suggest_best_shot(
     cue_cm:          Tuple[float, float],
     remaining_balls: List[Dict],
@@ -129,17 +181,24 @@ def suggest_best_shot(
       target_path    : target-to-pocket path in table cm (2 or 3 points).
                        3-point paths indicate a 1-cushion bank shot.
 
-    Scoring heuristic
-    -----------------
+    Scoring heuristic (lower is better)
+    -------------------------------------
     For every (ball, pocket) pair:
-      • Direct shot (unblocked cue path + unblocked target path):
-          score = 0.6 * angle_score + 0.2 * dist_ct_score + 0.2 * dist_tp_score
-      • Bank shot (target bounces off 1 cushion, needed when target→pocket blocked):
-          score = same formula  +  0.2 penalty
-      Angle score is quadratic (angle/π)² to penalise large cut angles harshly.
-      A near-miss clearance penalty (up to +0.1) is added for cue paths that
-      barely clear an obstacle.
-      Candidates where the cue→ghost path is blocked are skipped entirely.
+
+      score = 0.60 × angle_score                     (quadratic cut-angle)
+            + 0.10 × dist_ct / table_diagonal        (absolute cue-to-target)
+            + 0.30 × dist_tp / table_diagonal        (absolute target-to-pocket)
+            + 0.25 × angle_score × dist_tp_score     (compounding interaction)
+            + 0.15 × (1 − cos φ)                     (entry-angle / rail-hug)
+            + 0.20 if bank shot
+            + 0..0.10 near-miss clearance penalty
+
+    Distances are normalised to the table diagonal (~136 cm) so difficulty
+    is absolute, not relative to the current candidate set.
+    The interaction term penalises shots that are simultaneously steeply cut
+    AND far from the pocket.  The entry-angle term penalises trajectories
+    that hug the rail into the pocket, which shrinks the effective opening.
+    Candidates where the cue→ghost path is blocked are skipped entirely.
     The pair with the lowest score wins.
     """
     best_ball: Optional[Dict] = None
@@ -262,32 +321,40 @@ def suggest_best_shot(
     if not candidates:
         return None, [], []
 
-    min_ct = min(c['dist_ct'] for c in candidates)
-    max_ct = max(c['dist_ct'] for c in candidates)
-    min_tp = min(c['dist_tp'] for c in candidates)
-    max_tp = max(c['dist_tp'] for c in candidates)
-
-    ct_range = max_ct - min_ct
-    tp_range = max_tp - min_tp
-
-    # Weights should sum to 1.0
-    w_angle = 0.6  # weight of angle between shot and target-to-pocket
-    w_ct    = 0.2  # weight of distance cue-target
-    w_tp    = 0.2  # weight of distance target-pocket
+    # --- Weights (sum to 1.0) ---
+    # High w_tp aggressively favours "hanger" balls already close to a pocket.
+    w_angle = 0.60   # cut-angle difficulty
+    w_ct    = 0.10   # cue-to-target distance
+    w_tp    = 0.30   # target-to-pocket distance
 
     for c in candidates:
-        # Quadratic angle penalty: small cuts stay easy, large cuts penalised harshly.
-        # A 30° cut scores 0.028 (was 0.167 linear). A 75° cut scores 0.174 (was 0.42).
-        angle_norm  = c['angle'] / math.pi  # 0..1
+        # 1. Quadratic cut-angle penalty: small cuts stay cheap, large cuts steep.
+        #    A 30° cut scores 0.028; a 75° cut scores 0.174.
+        angle_norm  = c['angle'] / math.pi   # 0 → 1
         angle_score = angle_norm ** 2
 
-        ct_score = 0.0 if ct_range < 1e-6 else (c['dist_ct'] - min_ct) / ct_range
-        tp_score = 0.0 if tp_range < 1e-6 else (c['dist_tp'] - min_tp) / tp_range
+        # 2. Absolute distance scores normalised to the table diagonal (~136 cm).
+        #    Avoids relative-frame biases; a hanger always scores near 0 regardless
+        #    of how many other candidates exist.
+        dist_ct_score = c['dist_ct'] / _TABLE_DIAGONAL_CM
+        dist_tp_score = c['dist_tp'] / _TABLE_DIAGONAL_CM
+
+        # 3. Angle × distance interaction penalty:
+        #    two independent difficulties (steep cut + long pocket distance)
+        #    compound in real play, so we multiply them.
+        interaction_penalty = 0.25 * (angle_score * dist_tp_score)
+
+        # 4. Entry-angle penalty: a trajectory hugging the rail reduces the
+        #    effective pocket opening.  target_path[-2] is the start of the
+        #    final segment, so bank shots use the post-cushion direction.
+        entry_penalty = _entry_angle_penalty(c['target_path'][-2], c['pocket'])
 
         score = (w_angle * angle_score
-                 + w_ct * ct_score
-                 + w_tp * tp_score
-                 + c['bank_penalty'])
+                 + w_ct   * dist_ct_score
+                 + w_tp   * dist_tp_score
+                 + c['bank_penalty']
+                 + interaction_penalty
+                 + entry_penalty)
 
         # Near-miss penalty: add up to +0.1 when the cue path barely clears an obstacle.
         cue_clr = _min_clearance(cue_cm, c['cue_path'][1], c['obstacles'])
@@ -295,9 +362,9 @@ def suggest_best_shot(
             score += 0.1 * (1.0 - cue_clr / BALL_RADIUS_CM)
 
         if score < best_score:
-            best_score     = score
-            best_ball      = c['ball']
-            best_cue_path  = c['cue_path']
+            best_score       = score
+            best_ball        = c['ball']
+            best_cue_path    = c['cue_path']
             best_target_path = c['target_path']
 
     return best_ball, best_cue_path, best_target_path

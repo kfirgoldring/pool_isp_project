@@ -6,7 +6,7 @@ All coordinates are in table centimetres (origin = top-left pocket).
 import math
 from typing import List, Tuple, Optional
 
-from config import BALL_RADIUS_CM, TABLE_WIDTH_CM, TABLE_HEIGHT_CM
+from config import BALL_RADIUS_CM, TABLE_WIDTH_CM, TABLE_HEIGHT_CM, RAIL_INSET_CM
 
 
 def is_path_blocked(
@@ -65,6 +65,7 @@ def find_bank_target_paths(
     obstacles: List[Tuple[float, float]],
     table_width_cm:  float = TABLE_WIDTH_CM,
     table_height_cm: float = TABLE_HEIGHT_CM,
+    rail_inset_cm:   float = RAIL_INSET_CM,
 ) -> List[List[Tuple[float, float]]]:
     """
     Compute all valid 1-cushion bank paths for the target ball to reach
@@ -95,16 +96,18 @@ def find_bank_target_paths(
     px, py = pocket_cm
     valid_paths: List[List[Tuple[float, float]]] = []
 
-    # Define the 4 walls as (wall_name, wall_coord, is_vertical, reflected_pocket_fn)
+    # Inset wall positions: the cushion face lies rail_inset_cm inside the frame.
+    left_x   = rail_inset_cm
+    right_x  = table_width_cm  - rail_inset_cm
+    top_y    = rail_inset_cm
+    bottom_y = table_height_cm - rail_inset_cm
+
+    # (wall_name, wall_coord, is_vertical, (reflected_px, reflected_py))
     walls = [
-        # Left wall  x = 0
-        ('left',   0.0,              True,  (-px,                       py)),
-        # Right wall x = table_width
-        ('right',  table_width_cm,   True,  (2.0 * table_width_cm - px, py)),
-        # Top wall   y = 0
-        ('top',    0.0,              False, (px,                        -py)),
-        # Bottom wall y = table_height
-        ('bottom', table_height_cm,  False, (px,  2.0 * table_height_cm - py)),
+        ('left',   left_x,   True,  (2.0 * left_x   - px,  py)),
+        ('right',  right_x,  True,  (2.0 * right_x  - px,  py)),
+        ('top',    top_y,    False, (px,  2.0 * top_y    - py)),
+        ('bottom', bottom_y, False, (px,  2.0 * bottom_y - py)),
     ]
 
     for wall_name, wall_coord, is_vertical, (rpx, rpy) in walls:
@@ -130,12 +133,12 @@ def find_bank_target_paths(
         wx = tx + t * ddx
         wy = ty + t * ddy
 
-        # Validate: hit point must lie within the wall extent
+        # Validate: hit point must lie within the inset playing surface
         if is_vertical:
-            if wy < -1e-6 or wy > table_height_cm + 1e-6:
+            if wy < top_y - 1e-6 or wy > bottom_y + 1e-6:
                 continue
         else:
-            if wx < -1e-6 or wx > table_width_cm + 1e-6:
+            if wx < left_x - 1e-6 or wx > right_x + 1e-6:
                 continue
 
         wall_hit = (wx, wy)
