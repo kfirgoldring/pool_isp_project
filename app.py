@@ -31,11 +31,11 @@ from typing import Callable, Dict, List, Optional, Tuple
 import numpy as np
 import cv2
 
-import config
+from core import config
 
 # ── Optional module imports (graceful fallback) ───────────────────────────────
 try:
-    from scene_understanding import (
+    from services.scene_understanding import (
         get_table_corners,
         compute_homography_from_corners,
     )
@@ -1438,7 +1438,7 @@ class BilliardsApp(QMainWindow):
             # 3b. Placement target rings (top-down mode only)
             if top_down:
                 import math
-                from game_tracker import ST_WAITING_FOR_BALLS as _ST_WAIT
+                from core.game_tracker import ST_WAITING_FOR_BALLS as _ST_WAIT
                 game_obj     = getattr(self, 'game', None)
                 cue_pocketed = getattr(game_obj, 'cue_ball_pocketed', False)
                 ring_r       = ball_r + PLACEMENT_RING_OFFSET
@@ -2273,7 +2273,7 @@ class BilliardsApp(QMainWindow):
             self.lbl_game_msg.setText('Game not initialized yet.')
             return
 
-        from game_tracker import ST_WAITING_FOR_BALLS, ST_GAME_OVER
+        from core.game_tracker import ST_WAITING_FOR_BALLS, ST_GAME_OVER
         # If a game is active, toggle pause/resume
         if game.state not in (ST_WAITING_FOR_BALLS, ST_GAME_OVER):
             self.paused = not self.paused
@@ -2413,7 +2413,7 @@ class BilliardsApp(QMainWindow):
         self.lbl_ball_rack.setText(rack_html)
 
         # ── Button state machine ──────────────────────────────────────────────
-        from game_tracker import ST_WAITING_FOR_BALLS, ST_GAME_OVER
+        from core.game_tracker import ST_WAITING_FOR_BALLS, ST_GAME_OVER
         game  = getattr(self, 'game', None)
         balls = getattr(self, '_last_balls', [])
         game_active = (game is not None and

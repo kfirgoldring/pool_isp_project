@@ -18,6 +18,7 @@ Coordinate system rule:
   Everything passed to gt.update() and trajectory functions is in table cm.
 """
 
+import os
 import sys
 from typing import Dict, List, Optional, Tuple
 
@@ -25,14 +26,14 @@ import cv2
 import numpy as np
 
 # ── Project modules ───────────────────────────────────────────────────────────
-from game_tracker import GameTracker, ST_TRACKING, ST_DISTURBED, TABLE_WIDTH_CM, TABLE_HEIGHT_CM
-from trajectory import suggest_best_shot
+from core.game_tracker import GameTracker, ST_TRACKING, ST_DISTURBED, TABLE_WIDTH_CM, TABLE_HEIGHT_CM
+from core.trajectory import suggest_best_shot
 
 # ── Ball Detection import ─────────────────────────────────────────────────────
 # detect_balls_with_color(frame_bgr, table_corners, ref_path, ...) → np.ndarray (N,3)
 # Each row: [x_cam_px, y_cam_px, color_str]
 try:
-    from ball_detection_test import detect_balls_with_color as _detect_balls_with_color
+    from services.ball_detection_test import detect_balls_with_color as _detect_balls_with_color
     DETECTION_AVAILABLE = True
     print('[main] ball_detection_test (Hough) module loaded.')
 except (ImportError, AttributeError) as _e:
@@ -103,7 +104,7 @@ def main() -> None:
         window = _ctx.get('window')
         if window is None:
             return
-        _run_tick(window, gt)
+        _run_tick(window, gt, _ctx)
 
     window = BilliardsApp(tick_callback=on_tick)
     window.game = gt
@@ -119,7 +120,7 @@ def main() -> None:
 # Per-frame orchestration tick
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _run_tick(window, gt: GameTracker) -> None:
+def _run_tick(window, gt: GameTracker, ctx: Optional[Dict] = None) -> None:
     """Single orchestration tick, called every 33 ms."""
 
     frame = window.grab_frame()
@@ -128,6 +129,7 @@ def _run_tick(window, gt: GameTracker) -> None:
 
     if window.table_corners is not None:
         gt.set_table_corners(window.table_corners)
+    _sync_tracker_reference(window, gt, ctx)
 
     raw_balls: List[Dict] = []
     if gt.needs_detection:
@@ -174,6 +176,45 @@ def _run_tick(window, gt: GameTracker) -> None:
         remaining      = gt.remaining_balls,
         selected_color = gt.selected_target_color,
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tracker reference sync
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _sync_tracker_reference(window, gt: GameTracker, ctx: Optional[Dict]) -> None:
+    """Keep GameTracker's reference image in sync with window.ref_path.
+
+    The image is loaded only when path/mtime changes to avoid disk IO per tick.
+    """
+    if ctx is None:
+        return
+
+    ref_path = getattr(window, 'ref_path', None)
+    mtime: Optional[float] = None
+    if ref_path:
+        try:
+            mtime = os.path.getmtime(ref_path)
+        except OSError:
+            mtime = None
+
+    if ref_path == ctx.get('ref_path') and mtime == ctx.get('ref_mtime'):
+        return
+
+    ctx['ref_path'] = ref_path
+    ctx['ref_mtime'] = mtime
+
+    if not ref_path or mtime is None:
+        gt.set_ref_image(None)
+        return
+
+    ref_img = cv2.imread(ref_path)
+    if ref_img is None:
+        print(f'[main] WARNING: failed to load reference image at {ref_path}')
+        gt.set_ref_image(None)
+        return
+
+    gt.set_ref_image(ref_img)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -249,32 +290,6 @@ def _adapt_detections(
     return balls
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Helper: find which ball color is at a table-cm click position
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _find_ball_color_at(
-    x_cm:      float,
-    y_cm:      float,
-    balls:     List[Dict],
-    tolerance: float = 3.5,   # cm — slightly larger than BALL_RADIUS_CM=2.875
-) -> Optional[str]:
-    """
-    Return the color of the ball whose center_cm is within tolerance of (x_cm, y_cm),
-    or None if no ball is close enough.
-    """
-    for ball in balls:
-        cm = ball.get('center_cm')
-        if cm is None:
-            continue
-        dx = x_cm - cm[0]
-        dy = y_cm - cm[1]
-        if dx * dx + dy * dy <= tolerance ** 2:
-            return ball.get('color')
-    return None
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Script entry
 # ─────────────────────────────────────────────────────────────────────────────
 

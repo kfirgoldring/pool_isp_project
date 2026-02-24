@@ -6,7 +6,7 @@ All coordinates are in table centimetres (origin = top-left pocket).
 import math
 from typing import List, Tuple, Optional
 
-from config import BALL_RADIUS_CM, TABLE_WIDTH_CM, TABLE_HEIGHT_CM, RAIL_INSET_CM
+from .config import BALL_RADIUS_CM, TABLE_WIDTH_CM, TABLE_HEIGHT_CM, RAIL_INSET_CM
 
 
 def is_path_blocked(

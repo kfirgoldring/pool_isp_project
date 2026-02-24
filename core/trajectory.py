@@ -6,8 +6,8 @@ Table is 122 cm Ã— 61 cm with 6 pockets at corners and mid-long-edges.
 """
 import math
 from typing import Dict, List, Optional, Tuple
-from config import BALL_RADIUS_CM, TABLE_HEIGHT_CM, TABLE_WIDTH_CM
-from physics_engine import is_path_blocked, find_bank_target_paths
+from .config import BALL_RADIUS_CM, TABLE_HEIGHT_CM, TABLE_WIDTH_CM
+from .physics_engine import is_path_blocked, find_bank_target_paths
 
 # Pocket positions derived from table dimensions and of-set 
 import math

@@ -358,7 +358,11 @@ def _load_table_corners_from_scene_understanding(img_path: str) -> Optional[np.n
     :return:
     """
     try:
-        import scene_understanding as su
+        try:
+            from . import scene_understanding as su
+        except ImportError:
+            # Support direct script execution: python services/ball_detection_test.py
+            from services import scene_understanding as su
         corners = su.get_table_corners(img_path)
         corners = np.asarray(corners, dtype=np.float32)
         if corners.shape == (4, 2):
@@ -743,7 +747,8 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         sessions = [sys.argv[1]]
     else:
-        runs_dir = os.path.join(os.path.dirname(__file__) or ".", "runs")
+        project_root = os.path.dirname(os.path.dirname(__file__))
+        runs_dir = os.path.join(project_root or ".", "runs")
         if not os.path.isdir(runs_dir):
             print(f"ERROR: runs directory not found at {runs_dir}")
             sys.exit(1)
