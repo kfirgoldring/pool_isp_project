@@ -785,11 +785,9 @@ if __name__ == "__main__":
         print(f"  Expected ball radius: {expected_radius:.1f} px" if expected_radius else "  Expected ball radius: unknown")
 
         debug_dir = os.path.join(session_dir, "debug")
-
         for img_path in captures:
             _process_single_frame(img_path, ref_path, corners, cfg, debug_dir)
             total_frames += 1
-
     elapsed = time.time() - t_start
     print(f"\n{'=' * 80}")
     print(f"Done. {total_frames} frames processed in {elapsed:.2f}s "

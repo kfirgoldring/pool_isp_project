@@ -76,7 +76,7 @@ CUE_BALL_PENALTY: int = 3
 # real pocket.  Does NOT count during the reacquisition window so that motion
 # blur (track loss during a fast shot) cannot trigger a false penalty.
 # (~333 ms at 30 fps)
-CUE_POCKET_CONFIRM_FRAMES: int = 10
+CUE_POCKET_CONFIRM_FRAMES: int = 60
 
 # Consecutive STABLE-TRACKING frames a colored ball must be absent before
 # registering it as pocketed.  Guards against touching-ball detection failure
