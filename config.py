@@ -1,5 +1,8 @@
 """Configuration for billiards assistance system"""
 
+import pathlib
+FONTS_DIR = pathlib.Path(__file__).parent / 'assets' / 'fonts'
+
 # Hardware settings
 CAMERA_INDEX = 0 # index of the camera to use
 
