@@ -110,7 +110,7 @@ class GameTracker:
 
     def __init__(
         self,
-        match_radius_cm:       float = 5.0,
+        match_radius_cm:       float = 0.0,
         ema_alpha:             float = 0.4,
         confirm_frames:        int   = 3,
         stale_frames:          int   = 5,
@@ -454,14 +454,6 @@ class GameTracker:
                 print(f'[tracker] Reacquisition done — checking stroke  balls={colors_now}')
                 self._check_for_stroke(current_snapshot, self._pre_disturb_pos)
 
-        # 5. Auto-detect returned pocketed balls: if a pocketed color
-        #    reappears in the confirmed snapshot, move it back to remaining.
-        for color in list(self.pocketed_balls):
-            if any(b.get('color') == color for b in current_snapshot):
-                self.pocketed_balls.remove(color)
-                self.remaining_balls.append(color)
-                print(f'[tracker] RETURNED: {color} back on table  remaining={self.remaining_balls}')
-
         self._confirmed_balls = current_snapshot
         return list(self._confirmed_balls)
 
@@ -558,6 +550,13 @@ class GameTracker:
                     print(f'[tracker] POCKETED: {color}  remaining={self.remaining_balls}')
                     if self.selected_target_color == color:
                         self.selected_target_color = None
+
+        # Check if any pocketed ball reappeared after this stroke (placed back).
+        for color in list(self.pocketed_balls):
+            if color in new_pos:
+                self.pocketed_balls.remove(color)
+                self.remaining_balls.append(color)
+                print(f'[tracker] RETURNED: {color} back on table  remaining={self.remaining_balls}')
 
         self._confirmed_balls = list(new_snapshot)
         self._confirmed_pos = dict(new_pos)
@@ -686,8 +685,10 @@ class GameTracker:
             # standard colors are valid; during play only remaining + white.
             if self.state == ST_WAITING_FOR_BALLS:
                 allowed_colors = {'white', 'bordeaux', 'blue', 'purple', 'yellow'}
-            else:
+            elif self.state == ST_GAME_OVER:
                 allowed_colors = set(self.remaining_balls) | set(self.pocketed_balls) | {'white'}
+            else:
+                allowed_colors = set(self.remaining_balls) | {'white'}
 
             for di, det in enumerate(raw_balls):
                 if di in matched_dets:
