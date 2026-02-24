@@ -1414,78 +1414,110 @@ class BilliardsApp(QMainWindow):
         # ── Draw screen-mode overlays ─────────────────────────────────────────
         ball_r = BALL_RADIUS_TOP_DOWN if top_down else 10
 
-        # 1. Target path (orange)
-        if len(target_path_px) >= 2:
-            self._draw_trajectory(canvas, target_path_px, color=COLOR_PATH_2)
+        if game_state != 'GAME_OVER':
+            # 1. Target path (orange)
+            if len(target_path_px) >= 2:
+                self._draw_trajectory(canvas, target_path_px, color=COLOR_PATH_2)
 
-        # 2. Cue path (cyan), extended backwards for aiming
-        if len(cue_path_px) >= 2:
-            extended = self._extend_path_backward(cue_path_px)
-            self._draw_trajectory(canvas, extended, color=COLOR_PATH)
+            # 2. Cue path (cyan), extended backwards for aiming
+            if len(cue_path_px) >= 2:
+                extended = self._extend_path_backward(cue_path_px)
+                self._draw_trajectory(canvas, extended, color=COLOR_PATH)
 
-        # 3. Ghost-ball outline at contact point
-        if len(cue_path_px) >= 2 and selected_color is not None:
-            ghost = cue_path_px[-1]
-            cv2.circle(canvas, ghost, ball_r, COLOR_PATH, 2, cv2.LINE_AA)
+            # 3. Ghost-ball outline at contact point
+            if len(cue_path_px) >= 2 and selected_color is not None:
+                ghost = cue_path_px[-1]
+                cv2.circle(canvas, ghost, ball_r, COLOR_PATH, 2, cv2.LINE_AA)
 
-        # 3b. Placement target rings (top-down mode only)
-        if top_down:
-            from game_tracker import ST_WAITING_FOR_BALLS as _ST_WAIT
-            game_obj     = getattr(self, 'game', None)
-            cue_pocketed = getattr(game_obj, 'cue_ball_pocketed', False)
-            ring_r       = ball_r + PLACEMENT_RING_OFFSET
+            # 3b. Placement target rings (top-down mode only)
+            if top_down:
+                import math
+                from game_tracker import ST_WAITING_FOR_BALLS as _ST_WAIT
+                game_obj     = getattr(self, 'game', None)
+                cue_pocketed = getattr(game_obj, 'cue_ball_pocketed', False)
+                ring_r       = ball_r + PLACEMENT_RING_OFFSET
 
-            if game_state == _ST_WAIT:
-                # Pre-game: show all 5 placement rings
-                for color, target_cm in GOLF_MODE_STARTING_POSITIONS.items():
-                    ctr = cm_to_disp(target_cm)
+                if game_state == _ST_WAIT:
+                    # Pre-game: show all 5 placement rings
+                    for color, target_cm in GOLF_MODE_STARTING_POSITIONS.items():
+                        ctr = cm_to_disp(target_cm)
+                        if ctr is not None:
+                            self._draw_placement_ring(
+                                canvas, ctr, ring_r,
+                                BALL_COLORS_BGR.get(color, BALL_COLORS_BGR['gray']),
+                            )
+                elif cue_pocketed:
+                    # Scratch recovery: show a pulsing double-ring so the player
+                    # can clearly distinguish it from the static pre-game rings.
+                    ctr = cm_to_disp(GOLF_MODE_STARTING_POSITIONS['white'])
                     if ctr is not None:
-                        self._draw_placement_ring(
-                            canvas, ctr, ring_r,
-                            BALL_COLORS_BGR.get(color, BALL_COLORS_BGR['gray']),
-                        )
-            elif cue_pocketed:
-                # Scratch recovery: show a pulsing double-ring so the player
-                # can clearly distinguish it from the static pre-game rings.
-                ctr = cm_to_disp(GOLF_MODE_STARTING_POSITIONS['white'])
-                if ctr is not None:
-                    import math
-                    # Outer ring — fixed, bright white
-                    cv2.circle(canvas, ctr, ring_r + 4,
-                               BALL_COLORS_BGR['white'], 3, cv2.LINE_AA)
-                    # Inner pulsing ring — oscillates ±4 px, orange tint
-                    pulse = int(4 * math.sin(self._render_tick * 0.25))
-                    cv2.circle(canvas, ctr, max(2, ring_r - 4 + pulse),
-                               (0, 120, 255), 2, cv2.LINE_AA)
-                    # Small cross-hair at centre
-                    cx, cy = ctr
-                    cv2.line(canvas, (cx - 6, cy), (cx + 6, cy),
-                             BALL_COLORS_BGR['white'], 1, cv2.LINE_AA)
-                    cv2.line(canvas, (cx, cy - 6), (cx, cy + 6),
-                             BALL_COLORS_BGR['white'], 1, cv2.LINE_AA)
+                        # Outer ring — fixed, bright white
+                        cv2.circle(canvas, ctr, ring_r + 4,
+                                   BALL_COLORS_BGR['white'], 3, cv2.LINE_AA)
+                        # Inner pulsing ring — oscillates ±4 px, orange tint
+                        pulse = int(4 * math.sin(self._render_tick * 0.25))
+                        cv2.circle(canvas, ctr, max(2, ring_r - 4 + pulse),
+                                   (0, 120, 255), 2, cv2.LINE_AA)
+                        # Small cross-hair at centre
+                        cx, cy = ctr
+                        cv2.line(canvas, (cx - 6, cy), (cx + 6, cy),
+                                 BALL_COLORS_BGR['white'], 1, cv2.LINE_AA)
+                        cv2.line(canvas, (cx, cy - 6), (cx, cy + 6),
+                                 BALL_COLORS_BGR['white'], 1, cv2.LINE_AA)
 
-        # 4. Detected balls
-        for ball in balls_disp:
-            disp = ball.get('_disp')
-            if disp is None:
-                continue
-            self._draw_ball(
-                canvas,
-                center     = disp,
-                radius     = ball_r,
-                color_name = ball.get('color', 'gray'),
-                is_cue     = ball.get('is_cue', False),
-                selected   = (ball.get('color') == selected_color and not ball.get('is_cue')),
-            )
+                    # 3c. FOUL banner — large centred overlay when cue is pocketed
+                    fh, fw = canvas.shape[:2]
+                    bar_y0 = int(fh * 0.12)
+                    bar_h  = int(fh * 0.22)
+                    overlay = canvas.copy()
+                    cv2.rectangle(overlay, (0, bar_y0), (fw, bar_y0 + bar_h),
+                                  (20, 20, 40), -1)
+                    cv2.addWeighted(overlay, 0.72, canvas, 0.28, 0, canvas)
+                    foul_lines = [
+                        ('FOUL!',                          1.6, 4, COLOR_PATH),
+                        ('Cue ball pocketed (+3 penalty)', 0.8, 2, (240, 240, 240)),
+                        ('Place it back on the table',     0.6, 1, (200, 200, 200)),
+                    ]
+                    ty = bar_y0 + int(bar_h * 0.28)
+                    for ftext, fscale, fthick, fcolor in foul_lines:
+                        (ftw, fth), _ = cv2.getTextSize(
+                            ftext, cv2.FONT_HERSHEY_SIMPLEX, fscale, fthick)
+                        cv2.putText(canvas, ftext, ((fw - ftw) // 2, ty),
+                                    cv2.FONT_HERSHEY_SIMPLEX, fscale, fcolor,
+                                    fthick, cv2.LINE_AA)
+                        ty += fth + int(bar_h * 0.18)
+
+                # 3d. Post-scratch cooldown countdown banner
+                game_obj = getattr(self, 'game', None)
+                cooldown = getattr(game_obj, '_scratch_return_cooldown', 0)
+                if cooldown > 0:
+                    import math as _math
+                    seconds_left = _math.ceil(cooldown / 30)
+                    msg = f'Game resumes in {seconds_left}s...'
+                    fh, fw = canvas.shape[:2]
+                    (mtw, _), _ = cv2.getTextSize(
+                        msg, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
+                    cv2.putText(canvas, msg, ((fw - mtw) // 2, int(fh * 0.08)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, COLOR_PATH, 2,
+                                cv2.LINE_AA)
+
+            # 4. Detected balls
+            for ball in balls_disp:
+                disp = ball.get('_disp')
+                if disp is None:
+                    continue
+                self._draw_ball(
+                    canvas,
+                    center     = disp,
+                    radius     = ball_r,
+                    color_name = ball.get('color', 'gray'),
+                    is_cue     = ball.get('is_cue', False),
+                    selected   = (ball.get('color') == selected_color and not ball.get('is_cue')),
+                )
 
         # 6. Game-state overlays
         if game_state == 'GAME_OVER':
             self._draw_game_over(canvas, stroke_count)
-
-        # 7. Pause indicator
-        if self.paused:
-            cv2.putText(canvas, 'PAUSED', (10, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 200, 255), 2, cv2.LINE_AA)
 
         # ── Push to camera label ──────────────────────────────────────────────
         self.camera_label.setPixmap(
