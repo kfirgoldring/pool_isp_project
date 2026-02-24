@@ -55,7 +55,7 @@ POCKET_RADIUS_CM: float = 8.0
 
 # Minimum displacement (cm) between confirmed and averaged position to
 # register as a real stroke rather than detection jitter.
-SHOT_THRESHOLD_CM: float = 2.0
+SHOT_THRESHOLD_CM: float = 4.0
 
 # Frame-diff motion detection: fraction of pixels whose intensity change
 # exceeds MOTION_DIFF_THRESH before the frame counts as "has motion".
@@ -159,6 +159,11 @@ class GameTracker:
         # Guards against touching-ball merges causing a false pocket.
         self._ball_hidden_frames: Dict[str, int] = {}
 
+        # Grace-period after scratch-return: prevents a spurious stroke being
+        # registered from normal scene activity immediately after the cue ball
+        # is placed back.  Counts down from 60 (~2 s at 30 fps).
+        self._scratch_return_cooldown: int = 0
+
     # ── Public properties ────────────────────────────────────────────────────
 
     def set_table_corners(self, corners: Optional[np.ndarray]) -> None:
@@ -223,6 +228,7 @@ class GameTracker:
         self._last_known_cue_pos = None
         self._cue_hidden_frames = 0
         self._ball_hidden_frames = {}
+        self._scratch_return_cooldown = 0
 
     def reset(self) -> None:
         """Return to WAITING_FOR_BALLS and clear all game state."""
@@ -244,6 +250,7 @@ class GameTracker:
         self._last_known_cue_pos = None
         self._cue_hidden_frames = 0
         self._ball_hidden_frames = {}
+        self._scratch_return_cooldown = 0
 
     def force_shot(self) -> None:
         """Debug: register one stroke without physical motion.
@@ -335,6 +342,16 @@ class GameTracker:
         EMA drift against a fixed snapshot would cause false positives from
         detection noise.
         """
+
+        # 0. Post-scratch-return grace period: keep tracking but suppress
+        #    motion detection so no spurious stroke fires for ~2 s.
+        if self._scratch_return_cooldown > 0:
+            self._scratch_return_cooldown -= 1
+            if raw_balls:
+                self._do_tracking(raw_balls, create_new=True)
+            current_snapshot = self._emit_confirmed()
+            self._confirmed_balls = current_snapshot
+            return list(self._confirmed_balls)
 
         # 1. Cheap motion check — may transition to DISTURBED
         if self._check_motion(frame):
@@ -445,28 +462,35 @@ class GameTracker:
         the _cue_hidden_frames threshold.  _register_stroke only clears the
         flag (on scratch-return) or leaves it as-is for colored balls.
         """
-        self.stroke_count += 1
+        # Scratch-return: placing the cue ball back is NOT a stroke — the
+        # penalty (+CUE_BALL_PENALTY) was already applied at pocket detection.
+        is_scratch_return = self.cue_ball_pocketed and 'white' in new_pos
+        if not is_scratch_return:
+            self.stroke_count += 1
         self._cue_hidden_frames = 0
         # Capture before resetting so the touching-ball guard below can read
         # the pre-stroke absence counts (same pattern as cue_hidden_frames).
         ball_hidden_snapshot = self._ball_hidden_frames
         self._ball_hidden_frames = {}  # reset for the next stroke
 
-        # Scratch-return confirmation: cue came back -> clear the pocketed flag.
-        # The penalty was already applied when cue_ball_pocketed was first set.
+        # Scratch-return confirmation: cue came back -> clear the pocketed flag
+        # and start the 2-second grace period.
         if self.cue_ball_pocketed and 'white' in new_pos:
             self.cue_ball_pocketed = False
+            self._scratch_return_cooldown = 60  # ~2 s at 30 fps
 
         # FIX #6 (touching balls): only pocket a colored ball if it has been
-        # absent for BALL_POCKET_CONFIRM_FRAMES consecutive stable-tracking ticks.
-        # This prevents a single-frame detection failure (e.g. two balls touching
-        # and merging into one blob) from registering a false pocket.
+        # absent for BALL_POCKET_CONFIRM_FRAMES consecutive stable-tracking ticks,
+        # OR if it was present in the pre-shot snapshot (_pre_disturb_pos) but is
+        # now gone — meaning it was definitively pocketed during this stroke cycle
+        # (the ball rolls in during DISTURBED so hidden-frame counts stay at 0).
         for color in list(self._confirmed_pos.keys()):
             if color == 'white':
                 continue
             if color in self.remaining_balls and color not in new_pos:
                 hidden = ball_hidden_snapshot.get(color, 0)
-                if hidden >= BALL_POCKET_CONFIRM_FRAMES:
+                was_present_before_shot = color in self._pre_disturb_pos
+                if hidden >= BALL_POCKET_CONFIRM_FRAMES or was_present_before_shot:
                     self.pocketed_balls.append(color)
                     self.remaining_balls.remove(color)
                     if self.selected_target_color == color:

@@ -320,17 +320,90 @@ def get_table_corners(image):
 
     return final_corners
 
+def detect_disturbance(ref, image):
+    """
+    Detects if a disturbance (e.g., hand or cue) is present inside the table borders
+    by comparing the current image to a reference image of the empty table.
+
+    Parameters
+    ----------
+    ref : np.ndarray
+        Reference image (empty table).
+    image : np.ndarray
+        Current frame to check for disturbance.
+    diff_pixel_thresh : int
+        Number of differing pixels required to trigger disturbance (tunable).
+    dilation_size : int
+        Size of dilation kernel for mask (tunable).
+
+    Returns
+    -------
+    bool
+        True if disturbance detected, False otherwise.
+    """
+    # Step 1: Get corners from reference image
+    corners = get_table_corners(ref)
+    if corners is None or len(corners) != 4:
+        print("Could not find table corners in reference image.")
+        return False
+
+    '''# Step 2: Create border mask
+    mask = np.zeros(ref.shape[:2], dtype=np.uint8)
+    pts = np.array(corners, dtype=np.int32)
+    pts = pts.reshape((-1, 1, 2))
+    cv2.polylines(mask, [pts], isClosed=True, color=255, thickness=1)
+    dilation_size = 15
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilation_size, dilation_size))
+    mask = cv2.dilate(mask, kernel, iterations=1)'''
+
+    # Step 1: Create filled table mask
+    mask_full = np.zeros(ref.shape[:2], dtype=np.uint8)
+    pts = np.array(corners, dtype=np.int32)
+    cv2.fillPoly(mask_full, [pts], 255)
+
+    # Step 2: Erode the mask to shrink it inward
+    dilation_size = 30
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (dilation_size, dilation_size))
+    mask_eroded = cv2.erode(mask_full, kernel, iterations=1)
+
+    # Step 3: Subtract eroded mask from full mask to get only the inner border
+    mask = cv2.subtract(mask_full, mask_eroded)
+
+    # Step 3: Mask both images
+    ref_masked = cv2.bitwise_and(ref, ref, mask=mask)
+    img_masked = cv2.bitwise_and(image, image, mask=mask)
+
+    # Step 4: Compute absolute difference in masked region
+    diff = cv2.absdiff(ref_masked, img_masked)
+    diff_gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY)
+    _, diff_thresh = cv2.threshold(diff_gray, 100, 255, cv2.THRESH_BINARY)
+
+    # Step 5: Count differing pixels
+    num_diff_pixels = cv2.countNonZero(diff_thresh)
+
+    # Debug visualization
+    #print(f"Number of differing pixels: {num_diff_pixels}")
+    #ref_masked_resize = cv2.resize(ref_masked, (ref_masked.shape[1] // 2, ref_masked.shape[0] // 2))
+    #img_masked_resize = cv2.resize(img_masked, (img_masked.shape[1] // 2, img_masked.shape[0] // 2))
+    #cv2.imshow("Reference Masked", ref_masked_resize)
+    #cv2.imshow("Current Masked", img_masked_resize)
+    #mask_resize = cv2.resize(mask, (mask.shape[1] // 2, mask.shape[0] // 2))
+    #cv2.imshow("mask", mask_resize)
+    #diff_resize = cv2.resize(diff, (diff.shape[1] // 2, diff.shape[0] // 2))
+    #cv2.imshow("Difference", diff_resize)
+    cv2.waitKey(0)
+
+    # Step 6: Decide disturbance
+    diff_pixel_thresh = 100
+    if num_diff_pixels > diff_pixel_thresh:
+        return True
+    else:
+        return False
 
 def main():
-    import sys
-    if len(sys.argv) < 2:
-        print("Usage: python scene_understanding.py <image_path>")
-        sys.exit(1)
-    image = cv2.imread(sys.argv[1])
-    if image is None:
-        print(f"Failed to load image: {sys.argv[1]}")
-        sys.exit(1)
-    get_table_corners(image)
+    ref = cv2.imread('runs\\2026-02-23_12-07-24\\ref.jpeg')
+    image = cv2.imread('runs\\2026-02-23_12-07-24\\capture_20260223_121004.jpeg')
+    print("Detecting disturbance in image_false:", detect_disturbance(ref,image))
 
 if __name__ == "__main__":
     main()
