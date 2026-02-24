@@ -43,6 +43,12 @@ try:
 except (ImportError, AttributeError):
     SCENE_AVAILABLE = False
 
+try:
+    from PIL import Image, ImageDraw, ImageFont as _PILImageFont
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
 # ── PyQt5 imports ─────────────────────────────────────────────────────────────
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
@@ -1473,19 +1479,23 @@ class BilliardsApp(QMainWindow):
                     cv2.rectangle(overlay, (0, bar_y0), (fw, bar_y0 + bar_h),
                                   (20, 20, 40), -1)
                     cv2.addWeighted(overlay, 0.72, canvas, 0.28, 0, canvas)
-                    foul_lines = [
-                        ('FOUL!',                          1.6, 4, COLOR_PATH),
-                        ('Cue ball pocketed (+3 penalty)', 0.8, 2, (240, 240, 240)),
-                        ('Place it back on the table',     0.6, 1, (200, 200, 200)),
-                    ]
-                    ty = bar_y0 + int(bar_h * 0.28)
-                    for ftext, fscale, fthick, fcolor in foul_lines:
-                        (ftw, fth), _ = cv2.getTextSize(
-                            ftext, cv2.FONT_HERSHEY_SIMPLEX, fscale, fthick)
-                        cv2.putText(canvas, ftext, ((fw - ftw) // 2, ty),
-                                    cv2.FONT_HERSHEY_SIMPLEX, fscale, fcolor,
-                                    fthick, cv2.LINE_AA)
-                        ty += fth + int(bar_h * 0.18)
+                    canvas = _draw_text_pil(
+                        canvas,
+                        lines=[
+                            ('FOUL!',
+                             'PlayfairDisplay-Black.ttf', 72,
+                             (217, 95, 26)),
+                            ('Cue ball pocketed (+3 penalty)',
+                             'DMSans-SemiBold.ttf', 28,
+                             (244, 239, 228)),
+                            ('Place it back on the table',
+                             'Lora-Italic.ttf', 22,
+                             (196, 184, 152)),
+                        ],
+                        start_y=bar_y0 + int(bar_h * 0.10),
+                        center_x=fw // 2,
+                        line_gap=12,
+                    )
 
                 # 3d. Post-scratch cooldown countdown banner
                 game_obj = getattr(self, 'game', None)
@@ -1495,11 +1505,12 @@ class BilliardsApp(QMainWindow):
                     seconds_left = _math.ceil(cooldown / 30)
                     msg = f'Game resumes in {seconds_left}s...'
                     fh, fw = canvas.shape[:2]
-                    (mtw, _), _ = cv2.getTextSize(
-                        msg, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
-                    cv2.putText(canvas, msg, ((fw - mtw) // 2, int(fh * 0.08)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.9, COLOR_PATH, 2,
-                                cv2.LINE_AA)
+                    canvas = _draw_text_pil(
+                        canvas,
+                        lines=[(msg, 'DMSans-Medium.ttf', 30, (217, 95, 26))],
+                        start_y=int(fh * 0.04),
+                        center_x=fw // 2,
+                    )
 
             # 4. Detected balls
             for ball in balls_disp:
@@ -2047,33 +2058,8 @@ class BilliardsApp(QMainWindow):
         return result
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Game-state overlays (score panel and game-over screen)
+    # Game-state overlays (game-over screen)
     # ─────────────────────────────────────────────────────────────────────────
-
-    def _draw_score_panel(
-        self,
-        canvas:       np.ndarray,
-        stroke_count: int,
-        remaining:    List[str],
-    ) -> None:
-        """Draw a semi-transparent score panel in the top-right corner."""
-        h, w = canvas.shape[:2]
-        panel_w, panel_h = 200, 56
-        x0 = w - panel_w - 8
-        y0 = 8
-        # Semi-transparent background
-        overlay = canvas.copy()
-        cv2.rectangle(overlay, (x0, y0), (x0 + panel_w, y0 + panel_h),
-                      (20, 20, 50), -1)
-        cv2.addWeighted(overlay, 0.65, canvas, 0.35, 0, canvas)
-        cv2.rectangle(canvas, (x0, y0), (x0 + panel_w, y0 + panel_h),
-                      (80, 80, 160), 1)
-        cv2.putText(canvas, f'Strokes: {stroke_count}',
-                    (x0 + 8, y0 + 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
-        cv2.putText(canvas, f'Remaining: {len(remaining)}',
-                    (x0 + 8, y0 + 44),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 1, cv2.LINE_AA)
 
     def _draw_game_over(
         self,
@@ -2086,19 +2072,19 @@ class BilliardsApp(QMainWindow):
         cv2.rectangle(overlay, (0, 0), (w, h), (10, 10, 30), -1)
         cv2.addWeighted(overlay, 0.6, canvas, 0.4, 0, canvas)
 
-        # Title
-        text1 = 'GAME OVER'
-        (tw1, th1), _ = cv2.getTextSize(text1, cv2.FONT_HERSHEY_SIMPLEX, 2.0, 4)
-        cv2.putText(canvas, text1,
-                    ((w - tw1) // 2, h // 2 - 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 2.0, (0, 200, 255), 4, cv2.LINE_AA)
-
-        # Score
-        text2 = f'Completed in {stroke_count} stroke{"s" if stroke_count != 1 else ""}!'
-        (tw2, _), _ = cv2.getTextSize(text2, cv2.FONT_HERSHEY_SIMPLEX, 0.9, 2)
-        cv2.putText(canvas, text2,
-                    ((w - tw2) // 2, h // 2 + 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2, cv2.LINE_AA)
+        score_text = (
+            f'Completed in {stroke_count} stroke{"s" if stroke_count != 1 else ""}!'
+        )
+        canvas[:] = _draw_text_pil(
+            canvas,
+            lines=[
+                ('GAME OVER',  'PlayfairDisplay-Black.ttf', 88, (217, 95, 26)),
+                (score_text,   'DMSans-Regular.ttf',        26, (244, 239, 228)),
+            ],
+            start_y=h // 2 - 80,
+            center_x=w // 2,
+            line_gap=24,
+        )
 
     # ─────────────────────────────────────────────────────────────────────────
     # Drawing primitives
@@ -2463,16 +2449,6 @@ class BilliardsApp(QMainWindow):
                 self._show_leaderboard()
         elif self._last_game_state == 'WAITING_FOR_BALLS':
             self.lbl_game_msg.setText('')
-        elif (game is not None
-              and getattr(game, 'cue_ball_pocketed', False)
-              and not self._last_cue_present):
-            self.lbl_game_msg.setText(
-                'Foul! Cue ball pocketed (+3 penalty) \u2014 place it back on the table.'
-            )
-        elif (game is not None
-              and getattr(game, 'cue_ball_pocketed', False)
-              and self._last_cue_present):
-            self.lbl_game_msg.setText('')
 
     # ─────────────────────────────────────────────────────────────────────────
     # Keyboard shortcuts
@@ -2582,6 +2558,58 @@ def _bgr_to_pixmap(frame: np.ndarray) -> QPixmap:
     h, w = rgb.shape[:2]
     qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888)
     return QPixmap.fromImage(qimg)
+
+
+# ── PIL font helpers ───────────────────────────────────────────────────────────
+
+_PIL_FONTS: dict = {}   # (filename, size) → PIL ImageFont
+
+
+def _get_pil_font(filename: str, size: int):
+    """Return a cached PIL ImageFont; falls back to PIL default on failure."""
+    if not PIL_AVAILABLE:
+        return None
+    key = (filename, size)
+    if key not in _PIL_FONTS:
+        try:
+            _PIL_FONTS[key] = _PILImageFont.truetype(
+                str(config.FONTS_DIR / filename), size
+            )
+        except Exception:
+            _PIL_FONTS[key] = _PILImageFont.load_default()
+    return _PIL_FONTS[key]
+
+
+def _draw_text_pil(
+    canvas: np.ndarray,
+    lines: list,
+    start_y: int,
+    center_x: int = None,
+    left_x: int = None,
+    line_gap: int = 10,
+) -> np.ndarray:
+    """
+    Draw branded text lines onto a BGR numpy frame using PIL/Pillow.
+
+    lines  — list of (text, font_filename, font_size_px, rgb_color)
+    center_x — if given, each line is horizontally centred at this x
+    left_x   — if given, each line starts at this x (overrides center_x)
+    Returns the modified canvas (BGR numpy array).
+    """
+    if not PIL_AVAILABLE:
+        return canvas
+    img  = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(img)
+    y = start_y
+    for text, font_file, size, rgb in lines:
+        font = _get_pil_font(font_file, size)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        tw   = bbox[2] - bbox[0]
+        th   = bbox[3] - bbox[1]
+        x    = left_x if left_x is not None else (center_x - tw // 2)
+        draw.text((x, y), text, font=font, fill=rgb)
+        y += th + line_gap
+    return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
