@@ -55,7 +55,7 @@ POCKET_RADIUS_CM: float = 8.0
 
 # Minimum displacement (cm) between confirmed and averaged position to
 # register as a real stroke rather than detection jitter.
-SHOT_THRESHOLD_CM: float = 4.0
+SHOT_THRESHOLD_CM: float = 6.0
 
 # Frame-diff motion detection: fraction of pixels whose intensity change
 # exceeds MOTION_DIFF_THRESH before the frame counts as "has motion".
@@ -110,7 +110,7 @@ class GameTracker:
 
     def __init__(
         self,
-        match_radius_cm:       float = 0.0,
+        match_radius_cm:       float = 1.0,
         ema_alpha:             float = 0.4,
         confirm_frames:        int   = 3,
         stale_frames:          int   = 5,
