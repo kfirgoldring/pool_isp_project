@@ -2377,9 +2377,16 @@ class BilliardsApp(QMainWindow):
         game_str = self._last_game_state.replace('_', ' ').title()
         self.lbl_game_status.setText(f'Game: {game_str}')
 
+        # Build rack source first so REMAINING and BALL RACK stay in sync.
+        detected_colors = [
+            b['color']
+            for b in getattr(self, '_last_balls', [])
+            if not b.get('is_cue') and b.get('color')
+        ]
+
         # Large number displays
         self.lbl_stroke_num.setText(str(self._last_stroke_count))
-        self.lbl_remaining_num.setText(str(len(self._last_remaining)))
+        self.lbl_remaining_num.setText(str(len(detected_colors)))
 
         # Target with colored dot
         if self._last_selected_color:
@@ -2398,11 +2405,6 @@ class BilliardsApp(QMainWindow):
             cue_dot = '<span style="color:#f0f0f0; font-size:18px;" title="Cue ball">\u25cf</span>'
         else:
             cue_dot = '<span style="color:#555555; font-size:18px;" title="Cue ball \u2014 not on table">\u25cb</span>'
-        detected_colors = [
-            b['color']
-            for b in getattr(self, '_last_balls', [])
-            if not b.get('is_cue') and b.get('color')
-        ]
         colored_dots = ' '.join(
             f'<span style="color:{_BALL_HEX.get(c, "#888888")}; font-size:18px;">\u25cf</span>'
             for c in detected_colors

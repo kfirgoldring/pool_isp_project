@@ -55,7 +55,8 @@ POCKET_RADIUS_CM: float = 8.0
 
 # Minimum displacement (cm) between confirmed and averaged position to
 # register as a real stroke rather than detection jitter.
-SHOT_THRESHOLD_CM: float = 6.0
+# Kept low so every real post-shot position change is counted.
+SHOT_THRESHOLD_CM: float = 1.0
 
 # Frame-diff motion detection: fraction of pixels whose intensity change
 # exceeds MOTION_DIFF_THRESH before the frame counts as "has motion".
@@ -84,6 +85,11 @@ CUE_POCKET_CONFIRM_FRAMES: int = 60
 # (~167 ms at 30 fps)
 BALL_POCKET_CONFIRM_FRAMES: int = 5
 
+# Consecutive detection ticks a pocketed color must be seen again before we
+# un-pocket it in TRACKING.  This lets false pocket events self-recover while
+# still rejecting one-frame color noise.
+BALL_RETURN_REDETECT_HITS: int = 3
+
 # Border disturbance detection (INACTIVE — infrastructure only).
 # _check_border_disturbance() is implemented but not called from the hot
 # path because comparing against _pre_disturb_frame also picks up balls
@@ -110,7 +116,7 @@ class GameTracker:
 
     def __init__(
         self,
-        match_radius_cm:       float = 1.0,
+        match_radius_cm:       float = 3.0,
         ema_alpha:             float = 0.4,
         confirm_frames:        int   = 3,
         stale_frames:          int   = 5,
@@ -172,6 +178,10 @@ class GameTracker:
         # Per-color consecutive-absence counters for colored balls.
         # Guards against touching-ball merges causing a false pocket.
         self._ball_hidden_frames: Dict[str, int] = {}
+
+        # Consecutive detection-hit counters for colors currently marked as
+        # pocketed.  Used to auto-recover false pocket events.
+        self._return_detect_hits: Dict[str, int] = {}
 
         # Grace-period after scratch-return: prevents a spurious stroke being
         # registered from normal scene activity immediately after the cue ball
@@ -261,6 +271,7 @@ class GameTracker:
         self._last_known_cue_pos = None
         self._cue_hidden_frames = 0
         self._ball_hidden_frames = {}
+        self._return_detect_hits = {}
         self._scratch_return_cooldown = 0
 
     def reset(self) -> None:
@@ -284,6 +295,7 @@ class GameTracker:
         self._last_known_cue_pos = None
         self._cue_hidden_frames = 0
         self._ball_hidden_frames = {}
+        self._return_detect_hits = {}
         self._scratch_return_cooldown = 0
 
     def force_shot(self) -> None:
@@ -351,11 +363,25 @@ class GameTracker:
             if raw_balls:
                 self._do_tracking(raw_balls, create_new=True)
                 snapshot = self._emit_confirmed()
+                # Only count actively matched confirmed tracks (stale==0), not
+                # stale leftovers from prior ticks. Otherwise ghost tracks can
+                # falsely "return" balls after GAME_OVER.
+                visible_confirmed_colors = {
+                    t.get('color')
+                    for t in self._tracks
+                    if t.get('stale', 0) == 0 and t.get('age', 0) >= self._confirm_frames
+                }
                 for color in list(self.pocketed_balls):
-                    if any(b.get('color') == color for b in snapshot):
-                        self.pocketed_balls.remove(color)
-                        self.remaining_balls.append(color)
-                        print(f'[tracker] RETURNED: {color} back on table  remaining={self.remaining_balls}')
+                    if color in visible_confirmed_colors:
+                        hits = self._return_detect_hits.get(color, 0) + 1
+                        self._return_detect_hits[color] = hits
+                        if hits >= BALL_RETURN_REDETECT_HITS:
+                            self.pocketed_balls.remove(color)
+                            self.remaining_balls.append(color)
+                            self._return_detect_hits.pop(color, None)
+                            print(f'[tracker] RETURNED: {color} back on table  remaining={self.remaining_balls}')
+                    else:
+                        self._return_detect_hits[color] = 0
                 if self.remaining_balls:
                     self.state = ST_TRACKING
                     print(f'[tracker] GAME_OVER → TRACKING  (ball returned)')
@@ -413,6 +439,23 @@ class GameTracker:
         # 2. Feed detections into EMA tracker
         if raw_balls:
             self._do_tracking(raw_balls, create_new=True)
+
+            # If a color was wrongly pocketed, allow it to return after being
+            # detected on consecutive detection ticks (not just one noisy frame).
+            if self._reacq_remaining == 0 and self.pocketed_balls:
+                seen_now = {b.get('color') for b in raw_balls}
+                for color in list(self.pocketed_balls):
+                    if color in seen_now:
+                        hits = self._return_detect_hits.get(color, 0) + 1
+                        self._return_detect_hits[color] = hits
+                        if hits >= BALL_RETURN_REDETECT_HITS:
+                            self.pocketed_balls.remove(color)
+                            if color not in self.remaining_balls:
+                                self.remaining_balls.append(color)
+                            self._return_detect_hits.pop(color, None)
+                            print(f'[tracker] RETURNED (re-detected): {color} back on table  remaining={self.remaining_balls}')
+                    else:
+                        self._return_detect_hits[color] = 0
 
         # 3a. Track white ball occlusion — FIX #5 (motion blur).
         #     Only count while the tracker is stable (not during reacquisition).
@@ -547,6 +590,7 @@ class GameTracker:
                 if hidden >= BALL_POCKET_CONFIRM_FRAMES or was_present_before_shot:
                     self.pocketed_balls.append(color)
                     self.remaining_balls.remove(color)
+                    self._return_detect_hits[color] = 0
                     print(f'[tracker] POCKETED: {color}  remaining={self.remaining_balls}')
                     if self.selected_target_color == color:
                         self.selected_target_color = None
@@ -556,6 +600,7 @@ class GameTracker:
             if color in new_pos:
                 self.pocketed_balls.remove(color)
                 self.remaining_balls.append(color)
+                self._return_detect_hits.pop(color, None)
                 print(f'[tracker] RETURNED: {color} back on table  remaining={self.remaining_balls}')
 
         self._confirmed_balls = list(new_snapshot)
