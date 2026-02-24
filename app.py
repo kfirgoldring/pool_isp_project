@@ -1845,6 +1845,11 @@ class BilliardsApp(QMainWindow):
         if ref_frame is not None:
             _CACHE_DIR.mkdir(parents=True, exist_ok=True)
             cv2.imwrite(str(_REF_CACHE), ref_frame)
+            try:
+                from ball_detection import clear_ref_cache
+                clear_ref_cache(str(_REF_CACHE))
+            except ImportError:
+                pass
             self.ref_path = str(_REF_CACHE)
 
             ts = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -1898,6 +1903,11 @@ class BilliardsApp(QMainWindow):
         if self._timer is not None:
             self._timer.stop()
             self._timer = None
+        # Reset game so stale GAME_OVER state doesn't immediately re-trigger leaderboard
+        game = getattr(self, 'game', None)
+        if game is not None:
+            game.reset()
+        self._last_game_state = 'WAITING_FOR_BALLS'
         self._stack.setCurrentIndex(2)   # → PlayerRegistrationPage
         self.statusBar().showMessage('Enter your name to begin.')
 
