@@ -1,8 +1,5 @@
 """
 Hough-only pool ball detection for a single frame using OpenCV.
-
-This keeps the same general preprocessing pipeline as ball_detection.py
-but uses Hough circles as the sole detector.
 """
 from typing import Dict, Iterable, List, Optional, Tuple
 import cv2
@@ -22,6 +19,11 @@ def _load_ref_image(ref_path: str) -> Optional[np.ndarray]:
     if img is not None:
         _ref_cache[ref_path] = img
     return img
+
+
+def clear_ref_cache(path: str) -> None:
+    """Remove a cached reference image so the next call reloads from disk."""
+    _ref_cache.pop(path, None)
 
 
 class BallDetection:
@@ -55,7 +57,7 @@ class BallDetectionConfig:
         # Color classification thresholds (HSV
         yellow_hue: Tuple[int, int] = (25, 30),
         blue_hue: Tuple[int, int] = (100, 110),
-        purple_hue: Tuple[int, int] = (70, 90),
+        purple_hue: Tuple[int, int] = (70, 125),
         red1_hue: Tuple[int, int] = (0, 10),
         red2_hue: Tuple[int, int] = (170, 179),
         black_val_max: int = 75,
@@ -263,12 +265,19 @@ def _classify_color(
     radius: float,
     cfg: BallDetectionConfig,
 ) -> str:
+    # Sample the inner 70% of the ball to avoid green table bleed at edges.
+    inner_r = max(3.0, radius * 0.7)
+
     sv = _mean_sv_in_circle(hsv, center, radius)
     if sv is not None:
         mean_s, mean_v = sv
         if mean_v - mean_s >= cfg.white_sat_diff_thresh:
             return "white"
-    median_hue = _median_hue_in_circle(hsv, center, radius, cfg.green_min_sat, cfg.green_min_val)
+    # min_sat=80 includes moderately-saturated balls like purple (sat ~110-140)
+    # while excluding low-sat green fringe pixels that would skew the hue.
+    median_hue = _median_hue_in_circle(hsv, center, radius, min_sat=80, min_val=30)
+    if median_hue is None:
+        median_hue = _median_hue_in_circle(hsv, center, inner_r, min_sat=80, min_val=30)
     if median_hue is None:
         return "unknown"
 
@@ -278,7 +287,6 @@ def _classify_color(
         lo, hi = hue_range
         if lo <= hi:
             return lo <= val <= hi
-        # Wrap-around range
         return val >= lo or val <= hi
 
     if _in_range(h, cfg.yellow_hue):
@@ -375,7 +383,7 @@ def detect_balls_hough(
     if ref_bgr is None:
         raise ValueError(f"Failed to read reference image: {ref_path}")
     if ref_bgr.shape[:2] != frame_bgr.shape[:2]:
-        raise ValueError("Reference and current frame must have the same resolution.")
+        ref_bgr = cv2.resize(ref_bgr, (frame_bgr.shape[1], frame_bgr.shape[0]))
 
     corners_arr = _order_points_clockwise(corners_arr)
     table_mask = _table_mask(frame_bgr.shape, corners_arr)
@@ -502,6 +510,52 @@ def detect_balls_hough(
     return color_filtered
 
 
+def detect_balls_with_color(
+    frame_bgr: np.ndarray,
+    table_corners: Optional[Iterable[Point]] = None,
+    ref_path: str = "ref.jpeg",
+    ball_diameter_cm: Optional[float] = 3,
+    table_size_cm: Optional[Tuple[float, float]] = None,
+    config: Optional[BallDetectionConfig] = None,
+    manual_corners: bool = False,
+) -> np.ndarray:
+    """
+    Detect pool balls and classify colors (pipeline-compatible API).
+
+    Returns np.ndarray of shape (N, 3): [x_cam_px, y_cam_px, color_string].
+    This matches the contract expected by main.py / _adapt_detections().
+    """
+    cfg = config or BallDetectionConfig()
+    detections = detect_balls_hough(
+        frame_bgr=frame_bgr,
+        table_corners=table_corners,
+        ref_path=ref_path,
+        ball_diameter_cm=ball_diameter_cm,
+        table_size_cm=table_size_cm,
+        config=cfg,
+    )
+
+    if not detections or frame_bgr is None or frame_bgr.size == 0:
+        return np.empty((0, 3), dtype=object)
+
+    hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+    if cfg.clahe_enabled:
+        clahe = cv2.createCLAHE(
+            clipLimit=cfg.clahe_clip_limit,
+            tileGridSize=(cfg.clahe_grid_size, cfg.clahe_grid_size),
+        )
+        hsv[:, :, 2] = clahe.apply(hsv[:, :, 2])
+
+    out: List[List[object]] = []
+    for d in detections:
+        color = _classify_color(hsv, d.center, d.radius_px, cfg)
+        out.append([float(d.center[0]), float(d.center[1]), color])
+
+    if not out:
+        return np.empty((0, 3), dtype=object)
+    return np.array(out, dtype=object)
+
+
 def draw_detections(
     frame_bgr: np.ndarray,
     detections: Iterable[BallDetection],
@@ -565,20 +619,70 @@ def save_edge_debug(
     cv2.imwrite(out_path, edges)
 
 
-if __name__ == "__main__":
-    ref_path = "runs/2026-02-23_18-13-09/ref.jpeg"
-    img_path = "runs/2026-02-23_18-13-09/capture_20260223_181437.jpeg"
+def _debug_print_detection(
+    idx: int,
+    det: BallDetection,
+    hsv: np.ndarray,
+    diff_mask: np.ndarray,
+    frame_bgr: np.ndarray,
+    cfg: BallDetectionConfig,
+) -> str:
+    """Print detailed debug info for a single detection. Returns the color label."""
+    cx, cy = det.center
+    r = det.radius_px
+    color = _classify_color(hsv, det.center, r, cfg)
+
+    h_img, w_img = hsv.shape[:2]
+    ir = int(round(r))
+    x0c, x1c = max(0, int(cx) - ir), min(w_img, int(cx) + ir + 1)
+    y0c, y1c = max(0, int(cy) - ir), min(h_img, int(cy) + ir + 1)
+    rh, rw = y1c - y0c, x1c - x0c
+    if rh > 0 and rw > 0:
+        yy, xx = np.ogrid[:rh, :rw]
+        circ = ((xx - (int(cx) - x0c)) ** 2 + (yy - (int(cy) - y0c)) ** 2) <= (ir * ir)
+        roi_s = hsv[y0c:y1c, x0c:x1c, 1].astype(np.float32)
+        roi_v = hsv[y0c:y1c, x0c:x1c, 2].astype(np.float32)
+        mean_s = float(np.mean(roi_s[circ])) if np.any(circ) else 0.0
+        mean_v = float(np.mean(roi_v[circ])) if np.any(circ) else 0.0
+    else:
+        mean_s, mean_v = 0.0, 0.0
+
+    median_hue = _median_hue_in_circle(hsv, (cx, cy), r, cfg.green_min_sat, cfg.green_min_val)
+    diff_ratio = _circle_diff_ratio(diff_mask, (cx, cy), r)
+    skin_ratio = _skin_ratio_in_circle(frame_bgr, (cx, cy), r)
+
+    print(
+        f"    [{idx:2d}] center=({cx:7.1f},{cy:7.1f})  r={r:5.1f}  "
+        f"color={color:<9s}  hue={'  None' if median_hue is None else f'{median_hue:6.1f}'}  "
+        f"S={mean_s:5.1f}  V={mean_v:5.1f}  "
+        f"diff_r={diff_ratio:.2f}  skin={'  None' if skin_ratio is None else f'{skin_ratio:.3f}'}"
+    )
+    return color
+
+
+def _process_single_frame(
+    img_path: str,
+    ref_path: str,
+    corners: np.ndarray,
+    cfg: BallDetectionConfig,
+    debug_dir: Optional[str],
+) -> None:
+    """Run Hough detection on one frame with full debug output."""
+    import os
+    basename = os.path.splitext(os.path.basename(img_path))[0]
     img = cv2.imread(img_path)
     if img is None:
-        raise SystemExit("Failed to read pool_table.jpeg")
-    cfg = BallDetectionConfig()
-    corners = _load_table_corners_from_scene_understanding(ref_path)
-    if corners is None:
-        raise SystemExit("Failed to load corners from scene_understanding")
+        print(f"  [SKIP] Cannot read {img_path}")
+        return
 
-    table_mask = _table_mask(img.shape, corners)
-    save_hue_histogram(img, table_mask, cfg, out_path="table_hue_hist.png")
-    # Build the same non-green mask used by Hough for edge debugging
+    print(f"\n  --- {basename} ({img.shape[1]}x{img.shape[0]}) ---")
+
+    # Run detection
+    dets = detect_balls_hough(img, table_corners=corners, ref_path=ref_path, config=cfg)
+    print(f"  Hough detections: {len(dets)}")
+
+    # Build supporting data for debug prints
+    table_mask_arr = _table_mask(img.shape, corners)
     hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     if cfg.clahe_enabled:
         clahe = cv2.createCLAHE(
@@ -586,120 +690,122 @@ if __name__ == "__main__":
             tileGridSize=(cfg.clahe_grid_size, cfg.clahe_grid_size),
         )
         hsv[:, :, 2] = clahe.apply(hsv[:, :, 2])
-    h = hsv[:, :, 0]
-    s = hsv[:, :, 1]
-    v = hsv[:, :, 2]
-    valid = (table_mask > 0) & (s >= cfg.green_min_sat) & (v >= cfg.green_min_val)
-    if np.any(valid):
-        hist = cv2.calcHist([h], [0], valid.astype(np.uint8), [180], [0, 180])
-        dominant_hue = int(np.argmax(hist))
-    else:
-        dominant_hue = 60
-    hw = cfg.green_hue_window
-    lower1 = np.array([max(0, dominant_hue - hw), cfg.green_min_sat, cfg.green_min_val], dtype=np.uint8)
-    upper1 = np.array([min(179, dominant_hue + hw), 255, 255], dtype=np.uint8)
-    green_mask = cv2.inRange(hsv, lower1, upper1)
-    if dominant_hue - hw < 0 or dominant_hue + hw > 179:
-        lower2 = np.array([0, cfg.green_min_sat, cfg.green_min_val], dtype=np.uint8)
-        upper2 = np.array([(dominant_hue + hw) % 180, 255, 255], dtype=np.uint8)
-        lower3 = np.array([(dominant_hue - hw) % 180, cfg.green_min_sat, cfg.green_min_val], dtype=np.uint8)
-        upper3 = np.array([179, 255, 255], dtype=np.uint8)
-        green_mask = cv2.inRange(hsv, lower2, upper2) | cv2.inRange(hsv, lower3, upper3)
-    non_green = cv2.bitwise_and(table_mask, cv2.bitwise_not(green_mask))
-    save_edge_debug(img, non_green, cfg, out_path="hough_edges.png")
 
-    dets = detect_balls_hough(img, table_corners=corners, ref_path=ref_path, config=cfg)
-    vis = draw_detections(img, dets)
-    for (x, y) in corners:
-        cv2.circle(vis, (int(x), int(y)), 8, (255, 0, 255), -1)
-    for i, d in enumerate(dets):
-        x0, y0, w, h = d.bbox
-        label_pos = (max(0, x0), max(15, y0 - 6))
-        cv2.putText(
-            vis,
-            str(i),
-            label_pos,
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 255, 0),
-            2,
-            cv2.LINE_AA,
-        )
-    cv2.imwrite("pool_table_annotated_hough.jpeg", vis)
-    print(f"detections: {len(dets)}")
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-    h = hsv[:, :, 0].astype(np.float32)
-    s = hsv[:, :, 1].astype(np.float32)
-    v = hsv[:, :, 2].astype(np.float32)
-    # Build diff mask for diff_ratio reporting (same preprocessing as main pipeline)
     ref_bgr = _load_ref_image(ref_path)
     blur_frame = cv2.GaussianBlur(img, (5, 5), 0)
     blur_ref = cv2.GaussianBlur(ref_bgr, (5, 5), 0) if ref_bgr is not None else blur_frame
     diff_bgr = cv2.absdiff(blur_frame, blur_ref)
-    gray = cv2.cvtColor(diff_bgr, cv2.COLOR_BGR2GRAY)
-    gray = cv2.medianBlur(gray, 3)
-    gray = cv2.bitwise_and(gray, gray, mask=table_mask)
-    _, diff_mask = cv2.threshold(gray, 25, 255, cv2.THRESH_BINARY)
+    diff_gray = cv2.cvtColor(diff_bgr, cv2.COLOR_BGR2GRAY)
+    diff_gray = cv2.medianBlur(diff_gray, 3)
+    diff_gray = cv2.bitwise_and(diff_gray, diff_gray, mask=table_mask_arr)
+    _, diff_mask = cv2.threshold(diff_gray, 25, 255, cv2.THRESH_BINARY)
     k = max(3, cfg.kernel_size | 1)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
     diff_mask = cv2.morphologyEx(diff_mask, cv2.MORPH_OPEN, kernel)
     diff_mask = cv2.morphologyEx(diff_mask, cv2.MORPH_CLOSE, kernel)
+
+    # Print per-detection diagnostics
+    colors = []
+    if dets:
+        print(f"  {'idx':>5s}  {'center':>17s}  {'r':>5s}  {'color':<9s}  "
+              f"{'hue':>6s}  {'S':>5s}  {'V':>5s}  {'diff_r':>6s}  {'skin':>6s}")
+        print(f"  {'-'*75}")
     for i, d in enumerate(dets):
-        cx, cy = d.center
-        r = d.radius_px
-        color = _classify_color(hsv, d.center, d.radius_px, cfg)
-        h_img, w_img = hsv.shape[:2]
-        yy, xx = np.ogrid[:h_img, :w_img]
-        mask = ((xx - cx) ** 2 + (yy - cy) ** 2) <= (r * r)
-        if not np.any(mask):
+        c = _debug_print_detection(i, d, hsv, diff_mask, img, cfg)
+        colors.append(c)
+
+    color_summary = ", ".join(colors) if colors else "none"
+    print(f"  Result: {len(dets)} ball(s) -> [{color_summary}]")
+
+    # Save annotated image
+    if debug_dir is not None:
+        import os
+        os.makedirs(debug_dir, exist_ok=True)
+        vis = draw_detections(img, dets)
+        if vis is not None:
+            for idx_d, (det, col) in enumerate(zip(dets, colors)):
+                dcx, dcy = int(round(det.center[0])), int(round(det.center[1]))
+                dr = int(round(det.radius_px))
+                cv2.putText(
+                    vis, f"{idx_d}:{col}",
+                    (dcx - dr, dcy - dr - 6),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 0), 1, cv2.LINE_AA,
+                )
+            for (px, py) in corners:
+                cv2.circle(vis, (int(px), int(py)), 8, (255, 0, 255), -1)
+            out_path = os.path.join(debug_dir, f"{basename}_hough_test.jpeg")
+            cv2.imwrite(out_path, vis, [cv2.IMWRITE_JPEG_QUALITY, 90])
+
+
+if __name__ == "__main__":
+    import os
+    import sys
+    import glob
+    import time
+
+    cfg = BallDetectionConfig()
+
+    if len(sys.argv) > 1:
+        sessions = [sys.argv[1]]
+    else:
+        runs_dir = os.path.join(os.path.dirname(__file__) or ".", "runs")
+        if not os.path.isdir(runs_dir):
+            print(f"ERROR: runs directory not found at {runs_dir}")
+            sys.exit(1)
+        sessions = sorted([
+            os.path.join(runs_dir, d)
+            for d in os.listdir(runs_dir)
+            if os.path.isdir(os.path.join(runs_dir, d)) and not d.startswith(".")
+        ])
+
+    print("=" * 80)
+    print("ball_detection_test.py  --  Hough-only detection on all runs")
+    print(f"Sessions: {len(sessions)}")
+    print("=" * 80)
+
+    total_frames = 0
+    total_dets = 0
+    t_start = time.time()
+
+    for session_dir in sessions:
+        session_name = os.path.basename(session_dir)
+        ref_path = os.path.join(session_dir, "ref.jpeg")
+        if not os.path.isfile(ref_path):
+            print(f"\n[SKIP] No ref.jpeg in {session_dir}")
             continue
-        median_hue = _median_hue_in_circle(hsv, (cx, cy), r, cfg.green_min_sat, cfg.green_min_val)
-        mean_s = float(np.mean(s[mask]))
-        mean_v = float(np.mean(v[mask]))
-        pixel_area = float(np.count_nonzero(mask))
-        circularity = None
-        if r > 0:
-            contour_mask = (mask.astype(np.uint8)) * 255
-            cnts, _ = cv2.findContours(contour_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            if cnts:
-                cnt = max(cnts, key=cv2.contourArea)
-                area_c = cv2.contourArea(cnt)
-                perim_c = cv2.arcLength(cnt, True)
-                if perim_c > 1e-3:
-                    circularity = float(4.0 * np.pi * area_c / (perim_c * perim_c))
-        diff_ratio = _circle_diff_ratio(diff_mask, (cx, cy), r)
-        # Hue std on current HSV, but only on diff_mask pixels inside the circle
-        hue_std = None
-        if diff_mask is not None:
-            h_img, w_img = hsv.shape[:2]
-            yy, xx = np.ogrid[:h_img, :w_img]
-            mask_r = ((xx - cx) ** 2 + (yy - cy) ** 2) <= (r * r)
-            mask_r = mask_r & (diff_mask > 0)
-            if np.any(mask_r):
-                hues = hsv[:, :, 0].astype(np.float32)[mask_r].ravel()
-                if hues.size >= 2:
-                    if hues.size > 500:
-                        idx = np.linspace(0, hues.size - 1, 500, dtype=np.int32)
-                        hues = hues[idx]
-                    a = hues[:, None]
-                    b = hues[None, :]
-                    dists = np.abs(a - b)
-                    circ_d = np.minimum(dists, 180.0 - dists)
-                    hue_std = float(np.std(hues))
-                elif hues.size == 1:
-                    hue_std = 0.0
-        skin_ratio = _skin_ratio_in_circle(img, (cx, cy), r)
-        print(
-            i,
-            "center", (round(cx, 2), round(cy, 2)),
-            "radius", round(r, 2),
-            "pixel_area", round(pixel_area, 1),
-            "circularity", None if circularity is None else round(circularity, 3),
-            "diff_ratio", None if diff_ratio is None else round(diff_ratio, 3),
-            "hue_std", None if hue_std is None else round(hue_std, 2),
-            "skin_ratio", None if skin_ratio is None else round(skin_ratio, 3),
-            "color", color,
-            "median_hue", None if median_hue is None else round(median_hue, 2),
-            "mean_s", round(mean_s, 2),
-            "mean_v", round(mean_v, 2),
-        )
+
+        captures = sorted(glob.glob(os.path.join(session_dir, "capture_*.*")))
+        if not captures:
+            print(f"\n[SKIP] No captures in {session_dir}")
+            continue
+
+        try:
+            corners = _load_table_corners_from_scene_understanding(ref_path)
+        except Exception as e:
+            print(f"\n[ERROR] Corner detection failed for {session_name}: {e}")
+            continue
+        if corners is None:
+            print(f"\n[ERROR] No corners for {session_name}")
+            continue
+        corners = _order_points_clockwise(corners)
+
+        expected_radius = _estimate_ball_radius_px(corners, 3.0, (120.0, 60.0))
+        table_area = float(abs(cv2.contourArea(corners)))
+
+        print(f"\n{'=' * 80}")
+        print(f"SESSION: {session_name}  ({len(captures)} frame(s))")
+        print(f"  Corners: {corners.astype(int).tolist()}")
+        print(f"  Table area: {table_area:.0f} px^2")
+        print(f"  Expected ball radius: {expected_radius:.1f} px" if expected_radius else "  Expected ball radius: unknown")
+
+        debug_dir = os.path.join(session_dir, "debug")
+
+        for img_path in captures:
+            _process_single_frame(img_path, ref_path, corners, cfg, debug_dir)
+            total_frames += 1
+
+    elapsed = time.time() - t_start
+    print(f"\n{'=' * 80}")
+    print(f"Done. {total_frames} frames processed in {elapsed:.2f}s "
+          f"({elapsed / max(total_frames, 1):.3f}s/frame)")
+    print(f"Debug images saved to <session>/debug/*_hough_test.jpeg")

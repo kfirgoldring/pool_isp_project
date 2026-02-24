@@ -28,16 +28,16 @@ import numpy as np
 from game_tracker import GameTracker, ST_TRACKING, ST_DISTURBED, TABLE_WIDTH_CM, TABLE_HEIGHT_CM
 from trajectory import suggest_best_shot
 
-# ── Ball Detection import (Person 1's module) ─────────────────────────────────
+# ── Ball Detection import ─────────────────────────────────────────────────────
 # detect_balls_with_color(frame_bgr, table_corners, ref_path, ...) → np.ndarray (N,3)
 # Each row: [x_cam_px, y_cam_px, color_str]
 try:
-    from ball_detection import detect_balls_with_color as _detect_balls_with_color
+    from ball_detection_test import detect_balls_with_color as _detect_balls_with_color
     DETECTION_AVAILABLE = True
-    print('[main] ball_detection module loaded.')
+    print('[main] ball_detection_test (Hough) module loaded.')
 except (ImportError, AttributeError) as _e:
     DETECTION_AVAILABLE = False
-    print(f'[main] ball_detection not available ({_e}).')
+    print(f'[main] ball_detection_test not available ({_e}).')
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -125,6 +125,9 @@ def _run_tick(window, gt: GameTracker) -> None:
     frame = window.grab_frame()
     if frame is None:
         return
+
+    if window.table_corners is not None:
+        gt.set_table_corners(window.table_corners)
 
     raw_balls: List[Dict] = []
     if gt.needs_detection:

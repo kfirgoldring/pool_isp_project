@@ -106,7 +106,7 @@ class GameTracker:
         confirm_frames:        int   = 3,
         stale_frames:          int   = 5,
         dead_zone_cm:          float = 1.0,
-        tracking_detect_every: int   = 5,
+        tracking_detect_every: int   = 2,
     ):
         # ── Tracking parameters ──────────────────────────────────────────────
         self._match_radius:      float = match_radius_cm
@@ -135,7 +135,10 @@ class GameTracker:
         # after calm returns.
         self._pre_disturb_pos: Dict[str, Tuple[float, float]] = {}
 
-        # Motion detection
+        # Motion detection (table_corners restricts diff to the table polygon)
+        self._table_corners: Optional[np.ndarray] = None
+        self._table_mask: Optional[np.ndarray] = None
+        self._table_mask_count: int = 0
         self._ref_frame: Optional[np.ndarray] = None
         self._calm_count: int = 0
 
@@ -158,6 +161,15 @@ class GameTracker:
 
     # ── Public properties ────────────────────────────────────────────────────
 
+    def set_table_corners(self, corners: Optional[np.ndarray]) -> None:
+        """Provide table corner pixels so motion detection is masked to the table."""
+        if corners is None:
+            self._table_corners = None
+            self._table_mask = None
+            self._table_mask_count = 0
+            return
+        self._table_corners = np.asarray(corners, dtype=np.int32)
+
     @property
     def needs_detection(self) -> bool:
         """True when the caller should run ball_detection this tick.
@@ -165,18 +177,19 @@ class GameTracker:
         WAITING_FOR_BALLS: every tick (need to find balls ASAP).
         TRACKING (re-acquiring): every tick (need fresh data).
         TRACKING (normal): every Nth tick (drift correction only).
-        DISTURBED / GAME_OVER: never.
+        DISTURBED: every tick (keep tracks warm so reacquisition is instant).
+        GAME_OVER: never.
         """
         if self.state == ST_WAITING_FOR_BALLS:
             return True
         if self.state == ST_TRACKING and self.cue_ball_pocketed:
-            return True   # actively search for white every tick until it returns
+            return True
         if self.state == ST_TRACKING:
             if self._reacq_remaining > 0:
                 return True
             return self._tick_count % self._tracking_interval == 0
-        if self.state == ST_DISTURBED and self.cue_ball_pocketed:
-            return True   # keep searching for white while table is disturbed
+        if self.state == ST_DISTURBED:
+            return True
         return False
 
     # ── Lifecycle methods ────────────────────────────────────────────────────
@@ -378,11 +391,12 @@ class GameTracker:
     def _tick_disturbed(self, frame: np.ndarray, raw_balls: List[Dict]) -> List[Dict]:
         """DISTURBED: freeze output, monitor for calm.
 
-        When cue_ball_pocketed is True we continue tracking so that white
-        can be found before the DISTURBED cycle resolves.
+        Detection now runs every tick during DISTURBED so existing tracks
+        stay warm.  create_new=False prevents motion-blurred false positives
+        from spawning spurious tracks; only matched existing tracks are updated.
         """
-        if self.cue_ball_pocketed and raw_balls:
-            self._do_tracking(raw_balls, create_new=True)
+        if raw_balls:
+            self._do_tracking(raw_balls, create_new=False)
 
         has_motion = self._check_motion(frame)
 
@@ -469,6 +483,10 @@ class GameTracker:
     def _check_motion(self, frame: np.ndarray) -> bool:
         """Cheap pixel-diff motion detector.  Returns True if motion detected.
 
+        When table_corners are set, only pixels inside the table polygon are
+        considered — this prevents hands, arms, and background movement from
+        triggering false DISTURBED transitions.
+
         The reference frame is only replaced when motion IS detected (or on
         first call).  This keeps the baseline stable during calm periods so
         the diff accumulates real changes rather than just comparing two
@@ -480,8 +498,19 @@ class GameTracker:
 
         diff = cv2.absdiff(frame, self._ref_frame)
         gray = cv2.cvtColor(diff, cv2.COLOR_BGR2GRAY) if diff.ndim == 3 else diff
+
+        if self._table_corners is not None:
+            h, w = gray.shape[:2]
+            if self._table_mask is None or self._table_mask.shape != (h, w):
+                self._table_mask = np.zeros((h, w), dtype=np.uint8)
+                cv2.fillConvexPoly(self._table_mask, self._table_corners, 255)
+                self._table_mask_count = int(np.count_nonzero(self._table_mask))
+            gray = cv2.bitwise_and(gray, gray, mask=self._table_mask)
+            total = self._table_mask_count
+        else:
+            total = gray.shape[0] * gray.shape[1]
+
         changed = int(np.count_nonzero(gray > MOTION_DIFF_THRESH))
-        total = gray.shape[0] * gray.shape[1]
         has_motion = total > 0 and changed / total > MOTION_PIXEL_FRAC
 
         if has_motion:
@@ -535,7 +564,7 @@ class GameTracker:
             # expect to see on the table right now.  In WAITING_FOR_BALLS all
             # standard colors are valid; during play only remaining + white.
             if self.state == ST_WAITING_FOR_BALLS:
-                allowed_colors = {'white', 'yellow', 'blue', 'bordeaux', 'purple'}
+                allowed_colors = {'white', 'bordeaux', 'blue', 'purple', 'yellow'}
             else:
                 allowed_colors = set(self.remaining_balls) | {'white'}
 
